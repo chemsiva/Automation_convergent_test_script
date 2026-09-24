@@ -3,7 +3,7 @@
 ╔══════════════════════════════════════════════════════════════════╗
 ║          DFT CONVERGENCE SUITE  –  FAPbI3 Cubic Perovskite       ║
 ║          Supports: Quantum ESPRESSO  &  SIESTA                   ║
-║          Version : 1.0   (2026-09-24)                  d          ║
+║          Version : 1.0   (2026-09-24)                           ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  Usage : python3 convergence_suite.py                            ║
 ║  The script will ask interactively:                              ║
