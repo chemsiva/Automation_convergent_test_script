@@ -1,37 +1,21 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║          DFT CONVERGENCE SUITE  –  FAPbI3 Cubic Perovskite       ║
-║          Supports: Quantum ESPRESSO  &  SIESTA                   ║
-║          Version : 1.0   (2026-09-24)                           ║
-╠══════════════════════════════════════════════════════════════════╣
-║  Usage : python3 convergence_suite.py                            ║
-║  The script will ask interactively:                              ║
-║    • Which DFT code  (QE or SIESTA)                              ║
-║    • Path to executable                                          ║
-║    • Path to pseudopotential directory                           ║
-║    • Number of MPI processes                                     ║
-║    • Number of OpenMP threads per MPI task  (QE only)            ║
-║    • Which stages to run                                         ║
-║                                                                  ║
-║  Stages – Quantum ESPRESSO                                       ║
-║    1. ecutwfc convergence     (plane-wave cutoff)                ║
-║    2. k-point mesh convergence                                   ║
-║    3. Lattice vs Energy       (EOS scan, Birch-Murnaghan fit)    ║
-║                                                                  ║
-║  Stages – SIESTA                                                 ║
-║    1. MeshCutoff convergence  (real-space grid)                  ║
-║    2. k-point mesh convergence                                   ║
-║    3. PAO.BasisSize convergence  (SZ / DZ / DZP / TZP)          ║
-║    4. PAO.EnergyShift convergence                                ║
-║    5. Lattice vs Energy       (EOS scan, Birch-Murnaghan fit)    ║
-║                                                                  ║
-║  Portability                                                     ║
-║    • No hardcoded paths or processor counts                      ║
-║    • Auto-detects executables via PATH                           ║
-║    • Auto-detects CPU count as default suggestion                ║
-║    • Works on any Linux/macOS cluster or workstation             ║
+║         DFT CONVERGENCE SUITE  –  Universal Crystal Edition      ║
+║         Supports: Quantum ESPRESSO  &  SIESTA                   ║
+║         Version : 2.0   (Generic CIF-driven)                     ║
 ╚══════════════════════════════════════════════════════════════════╝
+
+Usage:
+    python3 convergence_suite.py
+
+The script interactively:
+  1. Detects or prompts for any .cif structure file
+  2. Parses cell, species, coordinates, and atomic properties automatically
+  3. Prompts for DFT code (Quantum ESPRESSO or SIESTA)
+  4. Auto-detects binaries and pseudopotentials for all elements in the CIF
+  5. Configures MPI / OpenMP processes
+  6. Executes parameter sweeps and Birch-Murnaghan Equation of State (EOS)
 """
 
 import os
@@ -40,51 +24,226 @@ import math
 import shutil
 import subprocess
 import time
+import glob
+import re
 
 # ══════════════════════════════════════════════════════════════════
-#  CRYSTAL STRUCTURE  –  FAPbI3 cubic  (DO NOT CHANGE)
-#  Source: WMD group PBEsol-optimised structure, 300 K
-#  Space group P1,  a = b = c = 6.36130 Å,  12 atoms
+#  PERIODIC TABLE DATA  (Z and atomic mass in amu)
 # ══════════════════════════════════════════════════════════════════
-A_ANG   = 6.36130          # reference lattice parameter (Å)
-NAT     = 12               # number of atoms
-NTYP    = 5                # number of species: C, H, N, Pb, I
-
-# fractional atomic coordinates (x, y, z, species-label)
-ATOMS = [
-    (0.500001, 0.569011, 0.500000, "C"),
-    (0.500000, 0.741416, 0.500000, "H"),
-    (0.814009, 0.567630, 0.500000, "H"),
-    (0.704462, 0.315280, 0.500000, "H"),
-    (0.295538, 0.315280, 0.500000, "H"),
-    (0.185991, 0.567630, 0.500000, "H"),
-    (0.682927, 0.475280, 0.500000, "N"),
-    (0.317071, 0.475280, 0.500000, "N"),
-    (0.000000, 0.000000, 0.000000, "Pb"),
-    (0.500000, 0.000000, 0.000000, "I"),
-    (0.000000, 0.500000, 0.000000, "I"),
-    (0.000000, 0.000000, 0.500000, "I"),
-]
+PERIODIC_TABLE = {
+    "H":  (1,   1.008),   "He": (2,   4.0026),
+    "Li": (3,   6.94),    "Be": (4,   9.0122),  "B":  (5,  10.81),   "C":  (6,  12.011),
+    "N":  (7,  14.007),   "O":  (8,  15.999),   "F":  (9,  18.998),  "Ne": (10,  20.180),
+    "Na": (11, 22.990),   "Mg": (12, 24.305),   "Al": (13, 26.982),  "Si": (14,  28.085),
+    "P":  (15, 30.974),   "S":  (16, 32.06),    "Cl": (17, 35.45),   "Ar": (18,  39.948),
+    "K":  (19, 39.098),   "Ca": (20, 40.078),   "Sc": (21, 44.956),  "Ti": (22,  47.867),
+    "V":  (23, 50.942),   "Cr": (24, 51.996),   "Mn": (25, 54.938),  "Fe": (26,  55.845),
+    "Co": (27, 58.933),   "Ni": (28, 58.693),   "Cu": (29, 63.546),  "Zn": (30,  65.38),
+    "Ga": (31, 69.723),   "Ge": (32, 72.630),   "As": (33, 74.922),  "Se": (34,  78.971),
+    "Br": (35, 79.904),   "Kr": (36, 83.798),   "Rb": (37, 85.468),  "Sr": (38,  87.62),
+    "Y":  (39, 88.906),   "Zr": (40, 91.224),   "Nb": (41, 92.906),  "Mo": (42,  95.95),
+    "Tc": (43, 98.0),     "Ru": (44, 101.07),   "Rh": (45, 102.91),  "Pd": (46, 106.42),
+    "Ag": (47, 107.87),   "Cd": (48, 112.41),   "In": (49, 114.82),  "Sn": (50, 118.71),
+    "Sb": (51, 121.76),   "Te": (52, 127.60),   "I":  (53, 126.904), "Xe": (54, 131.29),
+    "Cs": (55, 132.91),   "Ba": (56, 137.33),   "La": (57, 138.91),  "Ce": (58, 140.12),
+    "Pr": (59, 140.91),   "Nd": (60, 144.24),   "Pm": (61, 145.0),   "Sm": (62, 150.36),
+    "Eu": (63, 151.96),   "Gd": (64, 157.25),   "Tb": (65, 158.93),  "Dy": (66, 162.50),
+    "Ho": (67, 164.93),   "Er": (68, 167.26),   "Tm": (69, 168.93),  "Yb": (70, 173.05),
+    "Lu": (71, 174.97),   "Hf": (72, 178.49),   "Ta": (73, 180.95),  "W":  (74, 183.84),
+    "Re": (75, 186.21),   "Os": (76, 190.23),   "Ir": (77, 192.22),  "Pt": (78, 195.08),
+    "Au": (79, 196.97),   "Hg": (80, 200.59),   "Tl": (81, 204.38),  "Pb": (82, 207.2),
+    "Bi": (83, 208.98),   "Po": (84, 209.0),    "At": (85, 210.0),   "Rn": (86, 222.0),
+    "Fr": (87, 223.0),    "Ra": (88, 226.0),    "Ac": (89, 227.0),   "Th": (90, 232.04),
+    "Pa": (91, 231.04),   "U":  (92, 238.03)
+}
 
 # ══════════════════════════════════════════════════════════════════
-#  CONVERGENCE TEST RANGES  –  edit these ranges if needed
+#  STRUCTURE CLASS  (Generic CIF Parser & Exporter)
 # ══════════════════════════════════════════════════════════════════
+class Structure:
+    """Represents a periodic crystal structure loaded from a CIF file."""
 
-# QE
-QE_ECUT_LIST    = [40, 50, 60, 70, 80, 90, 100]   # Ry
-QE_ECUT_DUAL    = 8     # ecutrho = dual * ecutwfc (PAW)
+    def __init__(self, cif_path):
+        self.cif_path = os.path.abspath(cif_path)
+        self.filename = os.path.basename(cif_path)
+        self.prefix = os.path.splitext(self.filename)[0].replace(" ", "_")
+        self.load(self.cif_path)
+
+    def load(self, path):
+        # Try loading via ASE first if available
+        try:
+            import ase.io
+            atoms = ase.io.read(path)
+            self.cell = [list(row) for row in atoms.cell[:]]
+            self.cellpar = list(atoms.cell.cellpar())
+            self.volume = float(atoms.get_volume())
+            self.symbols = atoms.get_chemical_symbols()
+            self.positions_frac = [list(p) for p in atoms.get_scaled_positions()]
+            self.formula = atoms.get_chemical_formula()
+        except Exception:
+            # Standalone fallback parser
+            self._load_fallback(path)
+
+        # Post-process species & indices
+        self.species = sorted(list(set(self.symbols)))
+        self.nat = len(self.symbols)
+        self.ntyp = len(self.species)
+        self.sp_idx = {sp: i + 1 for i, sp in enumerate(self.species)}
+
+        # Fallback formula string if needed
+        if not hasattr(self, 'formula') or not self.formula:
+            counts = {sp: self.symbols.count(sp) for sp in self.species}
+            self.formula = "".join(f"{sp}{counts[sp] if counts[sp] > 1 else ''}" for sp in self.species)
+
+    def _load_fallback(self, path):
+        """Pure-Python CIF reader without external dependencies."""
+        with open(path) as f:
+            content = f.read()
+
+        def get_tag(tag, default=0.0):
+            m = re.search(rf'^{tag}\s+([0-9\.\-\+eE]+)', content, re.MULTILINE)
+            if m:
+                val = re.sub(r'\(.*?\)', '', m.group(1))
+                return float(val)
+            return default
+
+        a = get_tag('_cell_length_a', 1.0)
+        b = get_tag('_cell_length_b', 1.0)
+        c = get_tag('_cell_length_c', 1.0)
+        alpha = get_tag('_cell_angle_alpha', 90.0)
+        beta  = get_tag('_cell_angle_beta',  90.0)
+        gamma = get_tag('_cell_angle_gamma', 90.0)
+        self.cellpar = [a, b, c, alpha, beta, gamma]
+
+        # Convert parameters to 3x3 lattice vectors
+        ar, br, gr = math.radians(alpha), math.radians(beta), math.radians(gamma)
+        ca, cb, cg = math.cos(ar), math.cos(br), math.cos(gr)
+        sg = math.sin(gr)
+        val = 1.0 + 2.0 * ca * cb * cg - ca*ca - cb*cb - cg*cg
+        V_factor = math.sqrt(max(0.0, val))
+
+        v1 = [a, 0.0, 0.0]
+        v2 = [b * cg, b * sg, 0.0]
+        v3 = [c * cb, c * (ca - cb*cg) / (sg if abs(sg) > 1e-8 else 1.0),
+              c * V_factor / (sg if abs(sg) > 1e-8 else 1.0)]
+        self.cell = [v1, v2, v3]
+        self.volume = a * b * c * V_factor
+
+        # Parse atom site loop
+        lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith('#')]
+        headers = []
+        data_rows = []
+        i = 0
+        while i < len(lines):
+            if lines[i] == 'loop_':
+                j = i + 1
+                curr_headers = []
+                while j < len(lines) and lines[j].startswith('_atom_site_'):
+                    curr_headers.append(lines[j])
+                    j += 1
+                if curr_headers:
+                    while j < len(lines) and not lines[j].startswith('_') and lines[j] != 'loop_':
+                        data_rows.append(lines[j].split())
+                        j += 1
+                    headers = curr_headers
+                    break
+            i += 1
+
+        x_idx = headers.index('_atom_site_fract_x')
+        y_idx = headers.index('_atom_site_fract_y')
+        z_idx = headers.index('_atom_site_fract_z')
+        sym_idx = headers.index('_atom_site_type_symbol') if '_atom_site_type_symbol' in headers else headers.index('_atom_site_label')
+
+        symbols = []
+        positions = []
+        for row in data_rows:
+            raw_sym = re.sub(r'[^A-Za-z]', '', row[sym_idx]).capitalize()
+            symbols.append(raw_sym)
+            x = float(re.sub(r'\(.*?\)', '', row[x_idx]))
+            y = float(re.sub(r'\(.*?\)', '', row[y_idx]))
+            z = float(re.sub(r'\(.*?\)', '', row[z_idx]))
+            positions.append([x, y, z])
+
+        self.symbols = symbols
+        self.positions_frac = positions
+        counts = {sp: symbols.count(sp) for sp in sorted(list(set(symbols)))}
+        self.formula = "".join(f"{sp}{counts[sp] if counts[sp] > 1 else ''}" for sp in sorted(counts.keys()))
+
+    def get_scaled_cell(self, scale):
+        """Returns 3x3 cell multiplied by isotropic linear factor 'scale'."""
+        return [[val * scale for val in row] for row in self.cell]
+
+    # ── Quantum ESPRESSO Exporters ──
+    def qe_cell_parameters(self, scale=1.0):
+        c = self.get_scaled_cell(scale)
+        lines = ["CELL_PARAMETERS {angstrom}"]
+        for row in c:
+            lines.append(f"  {row[0]:15.9f}  {row[1]:15.9f}  {row[2]:15.9f}")
+        return "\n".join(lines)
+
+    def qe_atomic_species(self, pseudo_dir):
+        lines = ["ATOMIC_SPECIES"]
+        for sp in self.species:
+            z, mass = PERIODIC_TABLE.get(sp, (0, 1.0))
+            upf = find_qe_upf(pseudo_dir, sp)
+            lines.append(f"  {sp:<4} {mass:>9.3f}  {upf}")
+        return "\n".join(lines)
+
+    def qe_atomic_positions(self):
+        lines = ["ATOMIC_POSITIONS {crystal}"]
+        for sym, (x, y, z) in zip(self.symbols, self.positions_frac):
+            lines.append(f"  {sym:<4}  {x:12.8f}  {y:12.8f}  {z:12.8f}")
+        return "\n".join(lines)
+
+    # ── SIESTA Exporters ──
+    def sia_lattice_block(self, scale=1.0):
+        c = self.get_scaled_cell(scale)
+        lines = [
+            "LatticeConstant 1.0 Ang",
+            "%block LatticeVectors"
+        ]
+        for row in c:
+            lines.append(f"  {row[0]:15.9f}  {row[1]:15.9f}  {row[2]:15.9f}")
+        lines.append("%endblock LatticeVectors")
+        return "\n".join(lines)
+
+    def sia_species_block(self, pseudo_dir):
+        lines = ["%block ChemicalSpeciesLabel"]
+        for sp in self.species:
+            z, _ = PERIODIC_TABLE.get(sp, (0, 1.0))
+            idx = self.sp_idx[sp]
+            lines.append(f"  {idx}  {z:3d}  {sp}")
+        lines.append("%endblock ChemicalSpeciesLabel")
+        return "\n".join(lines)
+
+    def sia_coords_block(self):
+        lines = [
+            "AtomicCoordinatesFormat Fractional",
+            "%block AtomicCoordinatesAndAtomicSpecies"
+        ]
+        for sym, (x, y, z) in zip(self.symbols, self.positions_frac):
+            idx = self.sp_idx[sym]
+            lines.append(f"  {x:12.8f}  {y:12.8f}  {z:12.8f}  {idx}  # {sym}")
+        lines.append("%endblock AtomicCoordinatesAndAtomicSpecies")
+        return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  DEFAULT CONVERGENCE RANGES
+# ══════════════════════════════════════════════════════════════════
+QE_ECUT_LIST    = [40, 50, 60, 70, 80, 90, 100]       # Ry
+QE_ECUT_DUAL    = 8                                   # ecutrho = dual * ecutwfc
 QE_KGRIDS       = [(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6),(7,7,7)]
-QE_ECUT_4KTEST  = 50    # Ry  (fixed during k-point test)
-QE_KGRID_4ETEST = (3,3,3)  # (fixed during ecut test)
-QE_ECUT_4EOS    = 70    # Ry  (converged value for EOS)
-QE_KGRID_4EOS   = (4,4,4)  # (converged grid for EOS)
+QE_ECUT_4KTEST  = 50                                  # Ry
+QE_KGRID_4ETEST = (3,3,3)
+QE_ECUT_4EOS    = 70                                  # Ry
+QE_KGRID_4EOS   = (4,4,4)
 
-# SIESTA
-SIA_MESHCUT     = [100,150,200,250,300,350,400,500]  # Ry
+SIA_MESHCUT     = [100, 150, 200, 250, 300, 350, 400, 500]  # Ry
 SIA_KGRIDS      = [(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6),(7,7,7)]
-SIA_BASIS       = ["SZ","DZ","DZP","TZP"]
-SIA_ESHIFT      = ["0.005","0.010","0.020","0.050","0.100"]  # Ry
-SIA_MC_4KTEST   = 300   # Ry
+SIA_BASIS       = ["SZ", "DZ", "DZP", "TZP"]
+SIA_ESHIFT      = ["0.005", "0.010", "0.020", "0.050", "0.100"]  # Ry
+SIA_MC_4KTEST   = 300
 SIA_KG_4MTEST   = (3,3,3)
 SIA_KG_4BASIS   = (4,4,4)
 SIA_KG_4ESHIFT  = (4,4,4)
@@ -95,15 +254,13 @@ SIA_ES_4EOS     = "0.010"
 SIA_ESHIFT_FIXED = "0.020"
 SIA_BASIS_FIXED  = "DZP"
 
-# EOS (both codes)
-EOS_FRACS = [round(0.940 + i*0.005, 3) for i in range(22)]  # 0.940 … 1.045
-EOS_CG_STEPS = 100   # ionic relaxation steps at each fixed a
+# EOS volume fractions: V/V0 in [0.940 ... 1.045]
+EOS_FRACS = [round(0.940 + i * 0.005, 3) for i in range(22)]
+EOS_CG_STEPS = 100
 
 # ══════════════════════════════════════════════════════════════════
-#  UTILITY FUNCTIONS
+#  UTILITIES & UI
 # ══════════════════════════════════════════════════════════════════
-
-BOHR = 1.889726             # Å → Bohr
 RY2EV = 13.605693122994
 EV2MEV = 1000.0
 
@@ -118,236 +275,100 @@ def c(tag, text):
         return f"{COLORS[tag]}{text}{COLORS['reset']}"
     return text
 
-
 def ask(prompt, default=""):
-    """Prompt user; return default on empty input."""
     if default:
         ans = input(f"  {prompt} [{default}]: ").strip()
         return ans if ans else default
-    ans = input(f"  {prompt}: ").strip()
-    return ans
+    return input(f"  {prompt}: ").strip()
 
+def ask_choice(prompt, options, default=0):
+    print(f"  {prompt}")
+    for i, opt in enumerate(options, 1):
+        print(f"    {i}) {opt}")
+    while True:
+        raw = ask("Enter choice number", str(default + 1))
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        print(c("warn", "  Invalid selection; try again."))
 
 def ask_int(prompt, default):
     while True:
         raw = ask(prompt, str(default))
         try:
             v = int(raw)
-            if v > 0:
-                return v
+            if v > 0: return v
         except ValueError:
             pass
-        print(f"    {c('warn','Please enter a positive integer.')}")
-
-
-def ask_choice(prompt, choices, default=None):
-    """Return one of choices."""
-    choices_str = " / ".join(choices)
-    defval = default or choices[0]
-    while True:
-        ans = ask(f"{prompt}  ({choices_str})", defval).strip().upper()
-        for ch in choices:
-            if ans.upper() == ch.upper():
-                return ch
-        print(f"    {c('warn', 'Please choose one of: ' + choices_str)}")
-
+        print(c("warn", "  Please enter a positive integer."))
 
 def detect_exe(names):
-    """Return first found executable path or empty string."""
     for name in names:
         path = shutil.which(name)
-        if path:
-            return path
+        if path: return path
     return ""
-
-
-def good_fft(n):
-    """Smallest integer ≥ n whose prime factors are only {2,3,5}."""
-    def ok(x):
-        for p in (2,3,5):
-            while x % p == 0:
-                x //= p
-        return x == 1
-    while not ok(n):
-        n += 1
-    return n
-
-
-def fft_grid_qe(ecutwfc, ecutrho, celldm1_bohr):
-    """Estimate FFT grid for cubic QE cell."""
-    g = math.sqrt(ecutrho)
-    a = celldm1_bohr
-    nr_raw = int(math.ceil(2.0 * g * a / (2.0 * math.pi))) + 2
-    nr = good_fft(max(nr_raw, 24))
-    return nr, nr, nr
-
 
 def write_file(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(text)
 
-
 def run_cmd(cmd, logfile):
-    """Run shell command, capture to logfile; return wall-time seconds."""
     t0 = time.time()
     with open(logfile, "w") as lf:
         subprocess.run(cmd, shell=True, stdout=lf, stderr=subprocess.STDOUT)
     return round(time.time() - t0)
 
-
 def print_header(title):
-    w = 60
+    w = 64
     print()
     print(c("header", "═" * w))
     print(c("header", f"  {title}"))
     print(c("header", "═" * w))
 
-
 # ══════════════════════════════════════════════════════════════════
-#  QE INPUT BUILDERS
+#  PSEUDOPOTENTIAL DISCOVERY & VALIDATION
 # ══════════════════════════════════════════════════════════════════
-
 def find_qe_upf(pseudo_dir, species):
-    """
-    Scan pseudo_dir for a UPF file for 'species'.
-    Priority: PAW (kjpaw) > USPP (rrkjus) > any .UPF
-    Returns filename (basename), raises FileNotFoundError if none found.
-    """
-    import glob as _glob
-    # Glob broadly then filter to exact element prefix (e.g. "C." or "C-")
-    # This prevents C→Ce, H→Hg, N→Na false matches.
+    """Find best matching UPF for species, preventing false prefix matches."""
     raw = (
-        _glob.glob(os.path.join(pseudo_dir, f"{species}*.UPF")) +
-        _glob.glob(os.path.join(pseudo_dir, f"{species}*.upf"))
+        glob.glob(os.path.join(pseudo_dir, f"{species}*.UPF")) +
+        glob.glob(os.path.join(pseudo_dir, f"{species}*.upf"))
     )
-    # keep only filenames whose stem starts exactly with species followed by
-    # a non-letter character (dot, underscore, dash, digit)
-    import re as _re
-    pat = _re.compile(rf"^{_re.escape(species)}[^A-Za-z]", _re.IGNORECASE)
+    pat = re.compile(rf"^{re.escape(species)}[^A-Za-z]", re.IGNORECASE)
     candidates = [p for p in raw if pat.match(os.path.basename(p))]
     if not candidates:
         raise FileNotFoundError(
-            f"No UPF found for {species} in {pseudo_dir}  "
-            f"(expected e.g. {species}.pbe-n-kjpaw_psl.1.0.0.UPF)")
+            f"No UPF found for element '{species}' in {pseudo_dir}")
     def rank(p):
         b = os.path.basename(p).lower()
         return 0 if "kjpaw" in b else (1 if "rrkjus" in b else 2)
     return os.path.basename(sorted(candidates, key=rank)[0])
 
-
-def qe_atomic_species(pseudo_dir):
-    """Build ATOMIC_SPECIES block; auto-selects best UPF per element."""
-    masses  = {"C":12.011,"H":1.008,"N":14.007,"Pb":207.2,"I":126.904}
-    lines   = ["ATOMIC_SPECIES"]
-    missing = []
-    for sp in ["C","H","N","Pb","I"]:
-        try:
-            fname = find_qe_upf(pseudo_dir, sp)
-        except FileNotFoundError as e:
-            missing.append(str(e))
-            fname = f"{sp}.pbe-MISSING.UPF"
-        lines.append(f"  {sp:<4} {masses[sp]:>9.3f}  {fname}")
-    if missing:
-        print(c("err", "\n  [QE] Missing pseudopotentials:"))
-        for m in missing:
-            print(c("err", f"    {m}"))
-    return "\n".join(lines)
-
-
-def qe_atomic_positions():
-    lines = ["ATOMIC_POSITIONS {crystal}"]
-    for x, y, z, sp in ATOMS:
-        lines.append(f"  {sp:<3}  {x:.6f}  {y:.6f}  {z:.6f}")
-    return "\n".join(lines)
-
-
-def qe_kpoints(kg):
-    return f"K_POINTS {{automatic}}\n  {kg[0]} {kg[1]} {kg[2]}  0 0 0"
-
-
-def qe_input(pseudo_dir, ecutwfc, kg, a_ang=A_ANG, calc="scf"):
-    ecutrho  = QE_ECUT_DUAL * ecutwfc
-    cdm1     = a_ang * BOHR
-    nr1,nr2,nr3 = fft_grid_qe(ecutwfc, ecutrho, cdm1)
-    ions = "\n&IONS\n    ion_dynamics = 'bfgs'\n/" if calc == "relax" else ""
-    return f"""\
-&CONTROL
-    calculation   = '{calc}'
-    prefix        = 'FAPbI3'
-    pseudo_dir    = '{pseudo_dir}'
-    outdir        = './out'
-    tstress       = .true.
-    tprnfor       = .true.
-    verbosity     = 'medium'
-    max_seconds   = 86400
-/
-&SYSTEM
-    ibrav         = 1
-    celldm(1)     = {cdm1:.6f}
-    nat           = {NAT}
-    ntyp          = {NTYP}
-    ecutwfc       = {ecutwfc}
-    ecutrho       = {ecutrho}
-    degauss       = 0.01
-    occupations   = 'smearing'
-    smearing      = 'gaussian'
-    nr1           = {nr1}
-    nr2           = {nr2}
-    nr3           = {nr3}
-/
-&ELECTRONS
-    conv_thr         = 1.0d-8
-    mixing_beta      = 0.40
-    electron_maxstep = 200
-    diagonalization  = 'david'
-    diago_david_ndim = 4
-/{ions}
-{qe_atomic_species(pseudo_dir)}
-{qe_atomic_positions()}
-{qe_kpoints(kg)}
-"""
-
-
-# ══════════════════════════════════════════════════════════════════
-#  SIESTA INPUT BUILDERS
-# ══════════════════════════════════════════════════════════════════
-
-def detect_sia_pseudo_format(pseudo_dir):
-    """
-    Scan pseudo_dir for .psml and .psf for the 5 required species.
-    Returns (fmt, found, missing):
-      fmt    : 'PSML' | 'PSF' | 'MIXED' | 'NONE'
-      found  : {sp: (abs_path, ext)}
-      missing: [sp, ...]
-    PSML is preferred over PSF when both exist for the same species.
-    """
-    species = ["C","H","N","Pb","I"]
-    found   = {}
-    import glob as _glob
-    import re as _re
-    for sp in species:
-        pat = _re.compile(rf"^{_re.escape(sp)}[^A-Za-z]", _re.IGNORECASE)
-        # search for psml first (preferred)
+def detect_sia_pseudo_format(pseudo_dir, species_list):
+    """Scan pseudo_dir for .psml and .psf for the given species."""
+    found = {}
+    for sp in species_list:
+        pat = re.compile(rf"^{re.escape(sp)}[^A-Za-z]", re.IGNORECASE)
+        # Search PSML first
         psml_matches = [
-            f for f in _glob.glob(os.path.join(pseudo_dir, "*.[pP][sS][mM][lL]"))
+            f for f in glob.glob(os.path.join(pseudo_dir, "*.[pP][sS][mM][lL]"))
             if pat.match(os.path.basename(f))
         ]
         if psml_matches:
-            # prefer exact match like Pb.psml if available
             exact = [f for f in psml_matches if os.path.basename(f).lower() == f"{sp.lower()}.psml"]
             found[sp] = (exact[0] if exact else psml_matches[0], ".psml")
             continue
-        # fallback: search for psf
+        # Fallback to PSF
         psf_matches = [
-            f for f in _glob.glob(os.path.join(pseudo_dir, "*.[pP][sS][fF]"))
+            f for f in glob.glob(os.path.join(pseudo_dir, "*.[pP][sS][fF]"))
             if pat.match(os.path.basename(f))
         ]
         if psf_matches:
             exact = [f for f in psf_matches if os.path.basename(f).lower() == f"{sp.lower()}.psf"]
             found[sp] = (exact[0] if exact else psf_matches[0], ".psf")
-    missing = [sp for sp in species if sp not in found]
-    exts    = set(ext for _, ext in found.values())
+
+    missing = [sp for sp in species_list if sp not in found]
+    exts = set(ext for _, ext in found.values())
     if not exts:
         fmt = "NONE"
     elif exts == {".psml"}:
@@ -358,62 +379,93 @@ def detect_sia_pseudo_format(pseudo_dir):
         fmt = "MIXED"
     return fmt, found, missing
 
+def sia_copy_pseudos(dest, pseudo_dir, species_list):
+    fmt, found, missing = detect_sia_pseudo_format(pseudo_dir, species_list)
+    os.makedirs(dest, exist_ok=True)
+    if missing:
+        print(c("err", f"\n  [SIESTA] Missing pseudopotentials for: {missing}"))
+    for sp, (src, ext) in found.items():
+        dst = os.path.join(dest, sp + ext)
+        if not os.path.exists(dst):
+            try:
+                os.symlink(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
 
-def sia_species_block(pseudo_dir):
-    """
-    Build %block ChemicalSpeciesLabel with correct pseudo filename per species.
-    Auto-detects PSML vs PSF in pseudo_dir.
-    """
-    Z   = {"C":6,"H":1,"N":7,"Pb":82,"I":53}
-    idx = {"C":1,"H":2,"N":3,"Pb":4,"I":5}
-    _, found, _ = detect_sia_pseudo_format(pseudo_dir)
-    lines = ["%block ChemicalSpeciesLabel"]
-    for sp in ["C","H","N","Pb","I"]:
-        fname = (os.path.basename(found[sp][0])
-                 if sp in found else f"{sp}.MISSING")
-        lines.append(f"  {idx[sp]}  {Z[sp]:3d}  {sp}")
-    lines.append("%endblock ChemicalSpeciesLabel")
-    return "\n".join(lines)
+# ══════════════════════════════════════════════════════════════════
+#  INPUT BUILDERS
+# ══════════════════════════════════════════════════════════════════
+def qe_kpoints(kg):
+    return f"K_POINTS {{automatic}}\n  {kg[0]} {kg[1]} {kg[2]}  0 0 0"
 
-
-def sia_coords_block():
-    sp_idx = {"C":1,"H":2,"N":3,"Pb":4,"I":5}
-    lines = ["%block AtomicCoordinatesAndAtomicSpecies"]
-    for x,y,z,sp in ATOMS:
-        lines.append(f"  {x:.6f}   {y:.6f}   {z:.6f}   {sp_idx[sp]}   # {sp}")
-    lines.append("%endblock AtomicCoordinatesAndAtomicSpecies")
-    return "\n".join(lines)
-
-
-def sia_kblock(kg):
-    return (f"%block kgrid_Monkhorst_Pack\n"
-            f"  {kg[0]:2d}   0   0   0.0\n"
-            f"   0  {kg[1]:2d}   0   0.0\n"
-            f"   0   0  {kg[2]:2d}   0.0\n"
-            f"%endblock kgrid_Monkhorst_Pack")
-
-
-def sia_input(pseudo_dir, meshcut, kg, basis, eshift,
-              a_ang=A_ANG, cg_steps=0):
+def qe_input(pseudo_dir, struct, ecutwfc, kg, scale=1.0, calc="scf"):
+    ecutrho = QE_ECUT_DUAL * ecutwfc
+    ions = "\n&IONS\n    ion_dynamics = 'bfgs'\n/" if calc == "relax" else ""
     return f"""\
-SystemName              FAPbI3_cubic
-SystemLabel             FAPbI3
-NumberOfAtoms           {NAT}
-NumberOfSpecies         {NTYP}
+&CONTROL
+    calculation   = '{calc}'
+    prefix        = '{struct.prefix}'
+    pseudo_dir    = '{pseudo_dir}'
+    outdir        = './out'
+    tstress       = .true.
+    tprnfor       = .true.
+    verbosity     = 'medium'
+    max_seconds   = 86400
+/
+&SYSTEM
+    ibrav         = 0
+    nat           = {struct.nat}
+    ntyp          = {struct.ntyp}
+    ecutwfc       = {ecutwfc}
+    ecutrho       = {ecutrho}
+    degauss       = 0.01
+    occupations   = 'smearing'
+    smearing      = 'gaussian'
+/
+&ELECTRONS
+    conv_thr         = 1.0d-8
+    mixing_beta      = 0.40
+    electron_maxstep = 200
+    diagonalization  = 'david'
+    diago_david_ndim = 4
+/{ions}
+{struct.qe_cell_parameters(scale)}
+{struct.qe_atomic_species(pseudo_dir)}
+{struct.qe_atomic_positions()}
+{qe_kpoints(kg)}
+"""
 
-{sia_species_block(pseudo_dir)}
+def qe_npool(kgrid):
+    n_kpts = kgrid[0] * kgrid[1] * kgrid[2]
+    for p in (8, 4, 2, 1):
+        if n_kpts % p == 0:
+            return p
+    return 1
 
-LatticeConstant         {a_ang:.6f} Ang
+def qe_mpi_cmd(exe, procs, omp, npool, inp, out):
+    pool_flag = f"-nk {npool}" if npool > 1 else ""
+    return f"OMP_NUM_THREADS={omp} mpirun -np {procs} {exe} {pool_flag} -in {inp} > {out} 2>&1"
 
-%block LatticeVectors
-  1.000000  0.000000  0.000000
-  0.000000  1.000000  0.000000
-  0.000000  0.000000  1.000000
-%endblock LatticeVectors
+def sia_input(pseudo_dir, struct, meshcut, kg, basis, eshift, scale=1.0, cg_steps=0):
+    geo_relax = f"""\
+MD.TypeOfRun            CG
+MD.NumCGsteps           {cg_steps}
+MD.MaxForceTol          0.01 eV/Ang
+MD.MaxStressTol         0.50 kBar
+MD.VariableCell         F
+""" if cg_steps > 0 else "MD.NumCGsteps           0"
 
-AtomicCoordinatesFormat  Fractional
+    return f"""\
+SystemName              {struct.prefix}
+SystemLabel             {struct.prefix}
+NumberOfAtoms           {struct.nat}
+NumberOfSpecies         {struct.ntyp}
 
-{sia_coords_block()}
+{struct.sia_species_block(pseudo_dir)}
+
+{struct.sia_lattice_block(scale)}
+
+{struct.sia_coords_block()}
 
 XC.functional           GGA
 XC.authors              PBE
@@ -429,7 +481,11 @@ PAO.BasisType           split
 PAO.BasisSize           {basis}
 PAO.EnergyShift         {eshift} Ry
 
-{sia_kblock(kg)}
+%block kgrid_Monkhorst_Pack
+  {kg[0]}  0  0  0.0
+  0  {kg[1]}  0  0.0
+  0  0  {kg[2]}  0.0
+%endblock kgrid_Monkhorst_Pack
 
 SolutionMethod          diagon
 MaxSCFIterations        300
@@ -438,16 +494,14 @@ SCF.MustConverge        true
 DM.MixingWeight         0.10
 DM.NumberPulay          5
 DM.Tolerance            1.0d-5
-DM.Require.Energy.Convergence   T
-DM.Energy.Tolerance             1.0d-5 eV
+DM.Require.Energy.Convergence T
+DM.Energy.Tolerance     1.0d-5 eV
 DM.UseSaveDM            F
 
-MD.TypeOfRun            CG
-MD.NumCGsteps           {cg_steps}
-MD.MaxForceTol          0.01 eV/Ang
-MD.MaxStressTol         0.50 kBar
-MD.VariableCell         F
+# ── Geometry Relaxation ──────────────────────────────────────────
+{geo_relax}
 
+# ── Output ───────────────────────────────────────────────────────
 SpinPolarized           F
 WriteForces             T
 WriteMullikenPop        1
@@ -456,34 +510,13 @@ SaveHS                  F
 SaveRHO                 F
 """
 
-
-def sia_copy_pseudos(dest, pseudo_dir):
-    """
-    Detect PSML or PSF (or both) in pseudo_dir for C H N Pb I.
-    PSML preferred; falls back to PSF per-species if PSML absent.
-    Symlinks found files into dest; copies if cross-device.
-    Prints a clear warning for any species with no pseudo found.
-    """
-    fmt, found, missing = detect_sia_pseudo_format(pseudo_dir)
-    os.makedirs(dest, exist_ok=True)
-
-    if missing:
-        print(c("err", f"\n  [SIESTA] No pseudo found for: {missing}"))
-        print(c("err",  "  Add .psml or .psf files for these elements to pseudo_dir."))
-
-    for sp, (src, ext) in found.items():
-        dst = os.path.join(dest, sp + ext)
-        if not os.path.exists(dst):
-            try:    os.symlink(src, dst)
-            except OSError: shutil.copy2(src, dst)
-
+def sia_mpi_cmd(exe, procs, fdf, out, err):
+    return f"mpirun -np {procs} {exe} < {fdf} > {out} 2> {err}"
 
 # ══════════════════════════════════════════════════════════════════
-#  OUTPUT PARSERS
+#  PARSERS
 # ══════════════════════════════════════════════════════════════════
-
 def qe_parse_energy(outfile):
-    """Return total energy in Ry, or None."""
     energy = None
     try:
         with open(outfile) as f:
@@ -494,16 +527,13 @@ def qe_parse_energy(outfile):
         pass
     return energy
 
-
 def qe_job_done(outfile):
     try:
         return any("JOB DONE" in l for l in open(outfile))
     except FileNotFoundError:
         return False
 
-
 def sia_parse_energy(outfile):
-    """Return total energy in eV, or None."""
     energy = None
     try:
         with open(outfile) as f:
@@ -517,7 +547,6 @@ def sia_parse_energy(outfile):
         pass
     return energy
 
-
 def sia_job_done(outfile):
     try:
         return any("Job completed" in l or "siesta: Final energy" in l
@@ -525,20 +554,16 @@ def sia_job_done(outfile):
     except FileNotFoundError:
         return False
 
-
 # ══════════════════════════════════════════════════════════════════
-#  CONVERGENCE TABLES
+#  ANALYSIS & TABLES
 # ══════════════════════════════════════════════════════════════════
-
 def print_table(rows, headers, col_widths, criterion_note=""):
-    """Generic table printer. rows: list of strings per column."""
     sep = "  ".join(f"{'─'*w}" for w in col_widths)
     hdr = "  ".join(f"{h:>{w}}" for h, w in zip(headers, col_widths))
     print(f"\n  {c('bold', hdr)}")
     print(f"  {sep}")
     for row in rows:
         line = "  ".join(f"{v:>{w}}" for v, w in zip(row, col_widths))
-        # highlight converged rows (last col contains "←")
         if "←" in row[-1]:
             print(f"  {c('ok', line)}")
         else:
@@ -547,241 +572,232 @@ def print_table(rows, headers, col_widths, criterion_note=""):
     if criterion_note:
         print(f"\n  {c('warn', criterion_note)}\n")
 
-
-def summarise_ecut(data, unit_factor, unit_label):
-    """data: list of (param, energy_in_ry_or_ev)"""
+def summarise_ecut(data, unit_factor, nat):
     rows = []
     prev = None
     for param, e in data:
-        de = (e - prev) * unit_factor / NAT if prev is not None else 0.0
+        de = (e - prev) * unit_factor / nat if prev is not None else 0.0
         flag = "  ←" if abs(de) < 1.0 and prev is not None else ""
         rows.append((str(param), f"{e:.8f}", f"{de:.4f}{flag}"))
         prev = e
-    print_table(rows,
-                ["Cutoff", "E_tot", "ΔE (meV/atom)"],
-                [12, 18, 16],
+    print_table(rows, ["Cutoff", "E_tot", "ΔE (meV/atom)"], [12, 18, 16],
                 "Criterion: |ΔE| < 1 meV/atom from previous step  (← converged)")
 
-
-def summarise_kpoints(data):
+def summarise_kpoints(data, nat):
     rows = []
     prev = None
     for kg_str, e in data:
-        de = (e - prev) * EV2MEV / NAT if prev is not None else 0.0
+        de = (e - prev) * EV2MEV / nat if prev is not None else 0.0
         flag = "  ←" if abs(de) < 0.5 and prev is not None else ""
         rows.append((kg_str, f"{e:.8f}", f"{de:.4f}{flag}"))
         prev = e
-    print_table(rows,
-                ["k-mesh", "E_tot (eV)", "ΔE (meV/atom)"],
-                [12, 18, 16],
+    print_table(rows, ["k-mesh", "E_tot (eV)", "ΔE (meV/atom)"], [12, 18, 16],
                 "Criterion: |ΔE| < 0.5 meV/atom  (← converged)")
 
-
-def summarise_basissize(data):
-    ORDER = {"SZ":0,"DZ":1,"DZP":2,"TZP":3}
+def summarise_basissize(data, nat):
+    ORDER = {"SZ": 0, "DZ": 1, "DZP": 2, "TZP": 3}
     data_s = sorted(data, key=lambda r: ORDER.get(r[0], 99))
+    comp = {"DZ": "vs SZ", "DZP": "vs DZ", "TZP": "vs DZP"}
     rows = []
     prev = None
-    comp = {"SZ":"minimal","DZ":"double-ζ","DZP":"double-ζ+pol","TZP":"triple-ζ+pol"}
     for bs, e in data_s:
-        de = (e - prev) * EV2MEV / NAT if prev is not None else 0.0
+        de = (e - prev) * EV2MEV / nat if prev is not None else 0.0
         flag = "  ←" if abs(de) < 1.0 and prev is not None else ""
-        rows.append((bs, comp.get(bs,""), f"{e:.8f}", f"{de:.4f}{flag}"))
+        rows.append((bs, comp.get(bs, ""), f"{e:.8f}", f"{de:.4f}{flag}"))
         prev = e
-    print_table(rows,
-                ["BasisSize","Description","E_tot (eV)","ΔE (meV/atom)"],
-                [10,16,18,16],
-                "Criterion: |ΔE| < 1 meV/atom vs next-larger basis")
+    print_table(rows, ["BasisSize", "Comparison", "E_tot (eV)", "ΔE (meV/atom)"],
+                [10, 12, 18, 16],
+                "Criterion: |ΔE| < 1 meV/atom vs next-larger basis  (← converged)")
 
+def summarise_energyshift(data, nat):
+    rows = []
+    prev = None
+    for es_str, e in data:
+        de = (e - prev) * EV2MEV / nat if prev is not None else 0.0
+        flag = "  ←" if abs(de) < 1.0 and prev is not None else ""
+        rows.append((es_str, f"{e:.8f}", f"{de:.4f}{flag}"))
+        prev = e
+    print_table(rows, ["EnergyShift", "E_tot (eV)", "ΔE (meV/atom)"], [14, 18, 16],
+                "EnergyShift determines orbital cutoff radius (lower = larger basis)")
 
 def summarise_eos(data):
-    """data: list of (frac, a_ang, vol, energy)"""
+    # data: (frac, scale, vol, energy_eV)
+    e_vals = [r[3] for r in data]
+    e_min  = min(e_vals)
     rows = []
-    for frac, a, v, e in sorted(data, key=lambda r: r[2]):
-        rows.append((f"{frac:.3f}", f"{a:.5f}", f"{v:.4f}", f"{e:.8f}"))
+    for frac, scale, vol, e in data:
+        de_rel = (e - e_min) * EV2MEV
+        star = "  ★ min" if abs(e - e_min) < 1e-6 else ""
+        rows.append((f"{frac:.3f}", f"{scale:.5f}", f"{vol:.3f}", f"{e:.6f}", f"{de_rel:.2f}{star}"))
     print_table(rows,
-                ["Vol frac","a (Å)","V (Å³)","E_tot"],
-                [9, 10, 10, 18])
+                ["V/V0", "Scale", "Vol (Å³)", "E_tot (eV)", "ΔE_rel (meV)"],
+                [8, 10, 12, 16, 14],
+                "Fixed-cutoff EOS scan: eliminates Pulay stress artifacts")
 
+def bm_eos(V, E0, B0, B0_prime, V0):
+    eta = (V0 / V) ** (2.0 / 3.0)
+    return E0 + (9.0 * V0 * B0 / 16.0) * (
+        (eta - 1.0) ** 3 * B0_prime +
+        (eta - 1.0) ** 2 * (6.0 - 4.0 * eta)
+    )
 
-# ══════════════════════════════════════════════════════════════════
-#  BIRCH-MURNAGHAN EOS FIT
-# ══════════════════════════════════════════════════════════════════
-
-def bm_fit(data_ev, base_dir):
-    """
-    data_ev: list of (frac, a_ang, vol_A3, energy_eV)
-    Fit BM 3rd-order EOS; write fit curve; print results.
-    """
-    vols = [r[2] for r in data_ev]
-    engs = [r[3] for r in data_ev]
-    try:
-        from scipy.optimize import curve_fit
-        import numpy as np
-    except ImportError:
-        i0 = engs.index(min(engs))
-        print(f"\n  {c('warn','scipy not found – skipping BM fit.')}")
-        print(f"  Raw minimum: a = {data_ev[i0][1]:.5f} Å  "
-              f"V = {vols[i0]:.4f} Å³  E = {engs[i0]:.8f} eV")
+def bm_fit(data, outdir, struct):
+    # data: (frac, scale, vol, E_eV)
+    vols = [r[2] for r in data]
+    e_ev = [r[3] for r in data]
+    if len(vols) < 5:
+        print("  Not enough points for Birch-Murnaghan fit.")
         return
 
-    V = __import__("numpy").array(vols, dtype=float)
-    E = __import__("numpy").array(engs, dtype=float)
-    import numpy as np
+    EV_PER_A3_TO_GPA = 160.21766208
+    min_idx = e_ev.index(min(e_ev))
+    V0_guess = vols[min_idx]
+    E0_guess = e_ev[min_idx]
+    B0_guess_gpa = 30.0
+    B0_guess = B0_guess_gpa / EV_PER_A3_TO_GPA
 
-    def bm3(V, E0, V0, B0, Bp):
-        B0_eV = B0 / 160.21766208   # GPa → eV/Å³
-        eta   = (V0 / V) ** (2.0/3.0)
-        return (E0 + 9.0*V0*B0_eV/16.0 *
-                (((eta-1.0)**3)*Bp + ((eta-1.0)**2)*(6.0-4.0*eta)))
-
-    i0 = int(np.argmin(E))
     try:
-        popt, pcov = curve_fit(bm3, V, E, p0=[E[i0],V[i0],30.0,4.0],
-                               maxfev=20000)
-        perr = np.sqrt(np.diag(pcov))
-        E0, V0, B0, Bp = popt
-        a0 = V0**(1.0/3.0)
-        print_header("Birch–Murnaghan 3rd-order EOS Fit")
-        print(f"    E₀  = {E0:.6f} ± {perr[0]:.6f}  eV")
-        print(f"    V₀  = {V0:.4f}  ± {perr[1]:.4f}   Å³")
-        print(c("ok",
-                f"    a₀  = {a0:.5f}  Å    ← equilibrium lattice parameter"))
-        print(c("ok",
-                f"    B₀  = {B0:.2f}   ± {perr[2]:.2f}    GPa  ← bulk modulus"))
-        print(f"    B₀' = {Bp:.3f}   ± {perr[3]:.3f}")
-        rmse = float(np.sqrt(np.mean((E - bm3(V, *popt))**2))) * 1000.0
-        print(f"    RMSE = {rmse:.3f}  meV")
+        from scipy.optimize import curve_fit
+        popt, _ = curve_fit(
+            bm_eos, vols, e_ev,
+            p0=[E0_guess, B0_guess, 4.0, V0_guess],
+            bounds=([-math.inf, 0.0, 1.0, min(vols)],
+                    [math.inf,  5.0, 10.0, max(vols)]),
+            maxfev=10000
+        )
+        E0_fit, B0_fit, B0p_fit, V0_fit = popt
+        B0_gpa = B0_fit * EV_PER_A3_TO_GPA
+        fit_ok = True
+    except Exception:
+        # Parabolic fallback
+        v_min = vols[min_idx]
+        e_min = e_ev[min_idx]
+        if 0 < min_idx < len(vols) - 1:
+            dv = vols[min_idx+1] - vols[min_idx-1]
+            d2e = (e_ev[min_idx+1] - 2*e_min + e_ev[min_idx-1]) / ((dv/2)**2)
+            B0_gpa = v_min * d2e * EV_PER_A3_TO_GPA
+        else:
+            B0_gpa = 0.0
+        E0_fit, B0_fit, B0p_fit, V0_fit = e_min, B0_gpa/EV_PER_A3_TO_GPA, 4.0, v_min
+        fit_ok = False
 
-        # write fitted curve
-        Vd = np.linspace(min(V)*0.98, max(V)*1.02, 200)
-        Ed = bm3(Vd, *popt)
-        fit_path = os.path.join(base_dir, "eos_fit_curve.dat")
-        with open(fit_path, "w") as f:
-            f.write("# V(Å³)   E_fit(eV)\n")
-            for v, e in zip(Vd, Ed):
-                f.write(f"{v:.4f}  {e:.8f}\n")
-        print(f"\n    Fitted curve → {fit_path}")
-    except RuntimeError as err:
-        print(f"  {c('err','BM fit did not converge')}: {err}")
+    scale_fit = (V0_fit / struct.volume) ** (1.0 / 3.0)
+    a_fit = struct.cellpar[0] * scale_fit
+    b_fit = struct.cellpar[1] * scale_fit
+    c_fit = struct.cellpar[2] * scale_fit
 
+    method = "Birch-Murnaghan 3rd-order fit" if fit_ok else "Parabolic estimate (fallback)"
+    print()
+    print(c("bold", f"  ─── Equation of State Fit Results ({method}) ───"))
+    print(f"  Equilibrium volume (V0)  : {V0_fit:.4f} Å³  (ref: {struct.volume:.4f} Å³)")
+    print(f"  Equilibrium cell lengths : a = {a_fit:.4f} Å, b = {b_fit:.4f} Å, c = {c_fit:.4f} Å")
+    print(f"  Ground-state energy (E0) : {E0_fit:.6f} eV")
+    print(f"  Bulk Modulus (B0)        : {B0_gpa:.2f} GPa")
+    print(f"  Pressure derivative (B0'): {B0p_fit:.2f}")
+
+    # Write fit curve
+    fit_path = os.path.join(outdir, "eos_fit_curve.dat")
+    v_dense = [min(vols) + i*(max(vols)-min(vols))/200 for i in range(201)]
+    with open(fit_path, "w") as f:
+        f.write(f"# Birch-Murnaghan 3rd-order EOS fit for {struct.formula}\n")
+        f.write(f"# V0 = {V0_fit:.6f} A3 | B0 = {B0_gpa:.4f} GPa | B0_prime = {B0p_fit:.4f}\n")
+        f.write(f"# Equilibrium cell: a={a_fit:.5f} b={b_fit:.5f} c={c_fit:.5f} Ang\n")
+        f.write("# V_A3      E_fit_eV\n")
+        for v in v_dense:
+            f.write(f"  {v:.6f}  {bm_eos(v, E0_fit, B0_fit, B0p_fit, V0_fit):.8f}\n")
+    print(c("ok", f"\n  ✓ Fit parameters and curve saved to: {fit_path}"))
 
 # ══════════════════════════════════════════════════════════════════
-#  STAGE RUNNERS  –  Quantum ESPRESSO
+#  STAGE RUNNERS  –  QUANTUM ESPRESSO
 # ══════════════════════════════════════════════════════════════════
-
-def qe_mpi_cmd(exe, mpi_procs, omp, npool, input_f, output_f):
-    pool_arg = f"-npool {npool}" if npool > 1 else ""
-    return (f"OMP_NUM_THREADS={omp} OMP_PROC_BIND=close OMP_PLACES=cores "
-            f"mpirun -np {mpi_procs} {exe} -ntg 2 {pool_arg} "
-            f"-i {input_f} > {output_f} 2>&1")
-
-
-def qe_npool(kg):
-    nk = kg[0]*kg[1]*kg[2]
-    for p in (4, 3, 2, 1):
-        if nk % p == 0:
-            return p
-    return 1
-
-
 def qe_run_stage1(cfg):
-    exe, procs, omp, pseudo_dir, base = (
+    exe, procs, omp, pseudo_dir, base, struct = (
         cfg["exe"], cfg["procs"], cfg["omp"],
-        cfg["pseudo_dir"], cfg["base"])
+        cfg["pseudo_dir"], cfg["base"], cfg["struct"])
     stage_dir = os.path.join(base, "qe_01_ecut")
-    print_header("QE Stage 1 – ecutwfc convergence")
-    print(f"  k-mesh fixed: {QE_KGRID_4ETEST}  |  ecutrho = {QE_ECUT_DUAL}×ecutwfc")
+    print_header(f"QE Stage 1 – Plane-wave cutoff convergence ({struct.formula})")
+    print(f"  k-mesh fixed : {QE_KGRID_4ETEST}  |  Dual (ecutrho/ecutwfc): {QE_ECUT_DUAL}x")
 
     results = []
     for ecut in QE_ECUT_LIST:
-        label  = f"ecut_{ecut}Ry"
-        subdir = os.path.join(stage_dir, label)
-        inp    = os.path.join(subdir, "input.in")
-        out    = os.path.join(subdir, "output.out")
+        subdir = os.path.join(stage_dir, f"ecut_{ecut}Ry")
+        inp = os.path.join(subdir, "input.in")
+        out = os.path.join(subdir, "output.out")
         os.makedirs(os.path.join(subdir, "out"), exist_ok=True)
-        write_file(inp, qe_input(pseudo_dir, ecut, QE_KGRID_4ETEST))
+        write_file(inp, qe_input(pseudo_dir, struct, ecut, QE_KGRID_4ETEST))
         cmd = qe_mpi_cmd(exe, procs, omp, qe_npool(QE_KGRID_4ETEST), "input.in", "output.out")
-        print(f"  → ecutwfc = {ecut} Ry ... ", end="", flush=True)
+        print(f"  → ecutwfc = {ecut:3d} Ry ... ", end="", flush=True)
         t = run_cmd(f"cd {subdir} && {cmd}", os.path.join(subdir, "runner.log"))
         if qe_job_done(out):
-            e = qe_parse_energy(out)
-            results.append((ecut, e))
-            print(c("ok", f"✓  E = {e:.8f} Ry  ({t}s)"))
+            e_ry = qe_parse_energy(out)
+            results.append((ecut, e_ry))
+            print(c("ok", f"✓  E = {e_ry:.8f} Ry  ({t}s)"))
         else:
             print(c("err", "✗ FAILED"))
 
     if results:
         print_header("QE Stage 1 – Results")
-        summarise_ecut([(r[0], r[1]*RY2EV) for r in results],
-                       EV2MEV, "meV")
-        _save_dat(os.path.join(stage_dir, "results.dat"),
-                  ["ecut_Ry", "E_Ry", "E_eV"],
-                  [(r[0], r[1], r[1]*RY2EV) for r in results])
+        summarise_ecut(results, RY2EV * EV2MEV, struct.nat)
+        _save_dat(os.path.join(stage_dir, "results.dat"), ["ecut_Ry", "E_Ry"], results)
     return results
 
-
 def qe_run_stage2(cfg):
-    exe, procs, omp, pseudo_dir, base = (
+    exe, procs, omp, pseudo_dir, base, struct = (
         cfg["exe"], cfg["procs"], cfg["omp"],
-        cfg["pseudo_dir"], cfg["base"])
+        cfg["pseudo_dir"], cfg["base"], cfg["struct"])
     stage_dir = os.path.join(base, "qe_02_kpoints")
-    print_header("QE Stage 2 – k-point mesh convergence")
+    print_header(f"QE Stage 2 – k-point mesh convergence ({struct.formula})")
     print(f"  ecutwfc fixed: {QE_ECUT_4KTEST} Ry")
 
     results = []
     for kg in QE_KGRIDS:
-        kg_str = "×".join(str(k) for k in kg)
-        label  = f"kgrid_{'x'.join(str(k) for k in kg)}"
-        subdir = os.path.join(stage_dir, label)
-        inp    = os.path.join(subdir, "input.in")
-        out    = os.path.join(subdir, "output.out")
+        kg_str = "x".join(str(k) for k in kg)
+        subdir = os.path.join(stage_dir, f"kgrid_{kg_str}")
+        inp = os.path.join(subdir, "input.in")
+        out = os.path.join(subdir, "output.out")
         os.makedirs(os.path.join(subdir, "out"), exist_ok=True)
-        write_file(inp, qe_input(pseudo_dir, QE_ECUT_4KTEST, kg))
+        write_file(inp, qe_input(pseudo_dir, struct, QE_ECUT_4KTEST, kg))
         cmd = qe_mpi_cmd(exe, procs, omp, qe_npool(kg), "input.in", "output.out")
         print(f"  → k-mesh {kg_str} ... ", end="", flush=True)
         t = run_cmd(f"cd {subdir} && {cmd}", os.path.join(subdir, "runner.log"))
         if qe_job_done(out):
-            e = qe_parse_energy(out) * RY2EV
-            results.append((kg_str, e))
-            print(c("ok", f"✓  E = {e:.8f} eV  ({t}s)"))
+            e_ev = qe_parse_energy(out) * RY2EV
+            results.append((kg_str, e_ev))
+            print(c("ok", f"✓  E = {e_ev:.8f} eV  ({t}s)"))
         else:
             print(c("err", "✗ FAILED"))
 
     if results:
         print_header("QE Stage 2 – Results")
-        summarise_kpoints(results)
-        _save_dat(os.path.join(stage_dir, "results.dat"),
-                  ["k_mesh", "E_eV"], results)
+        summarise_kpoints(results, struct.nat)
+        _save_dat(os.path.join(stage_dir, "results.dat"), ["k_mesh", "E_eV"], results)
     return results
 
-
 def qe_run_stage3(cfg):
-    exe, procs, omp, pseudo_dir, base = (
+    exe, procs, omp, pseudo_dir, base, struct = (
         cfg["exe"], cfg["procs"], cfg["omp"],
-        cfg["pseudo_dir"], cfg["base"])
+        cfg["pseudo_dir"], cfg["base"], cfg["struct"])
     stage_dir = os.path.join(base, "qe_03_eos")
-    print_header("QE Stage 3 – Lattice parameter vs Energy  (EOS scan)")
+    print_header(f"QE Stage 3 – Equation of State Scan ({struct.formula})")
     print(f"  ecutwfc = {QE_ECUT_4EOS} Ry  |  k-mesh = {QE_KGRID_4EOS}  |  calc = relax")
 
     results = []
     for frac in EOS_FRACS:
-        a_new  = A_ANG * (frac ** (1.0/3.0))
-        vol    = a_new ** 3
-        label  = f"vol_{frac:.3f}"
+        scale = frac ** (1.0 / 3.0)
+        vol = struct.volume * frac
+        label = f"vol_{frac:.3f}"
         subdir = os.path.join(stage_dir, label)
-        inp    = os.path.join(subdir, "input.in")
-        out    = os.path.join(subdir, "output.out")
+        inp = os.path.join(subdir, "input.in")
+        out = os.path.join(subdir, "output.out")
         os.makedirs(os.path.join(subdir, "out"), exist_ok=True)
-        write_file(inp, qe_input(pseudo_dir, QE_ECUT_4EOS, QE_KGRID_4EOS,
-                                  a_ang=a_new, calc="relax"))
+        write_file(inp, qe_input(pseudo_dir, struct, QE_ECUT_4EOS, QE_KGRID_4EOS,
+                                scale=scale, calc="relax"))
         cmd = qe_mpi_cmd(exe, procs, omp, qe_npool(QE_KGRID_4EOS), "input.in", "output.out")
-        print(f"  → frac={frac:.3f}  a={a_new:.5f} Å ... ", end="", flush=True)
+        print(f"  → frac={frac:.3f}  V={vol:.2f} Å³ ... ", end="", flush=True)
         t = run_cmd(f"cd {subdir} && {cmd}", os.path.join(subdir, "runner.log"))
         if qe_job_done(out):
-            e_ry = qe_parse_energy(out)
-            e_ev = e_ry * RY2EV
-            results.append((frac, a_new, vol, e_ev))
+            e_ev = qe_parse_energy(out) * RY2EV
+            results.append((frac, scale, vol, e_ev))
             print(c("ok", f"✓  E = {e_ev:.8f} eV  ({t}s)"))
         else:
             print(c("err", "✗ FAILED"))
@@ -789,24 +805,17 @@ def qe_run_stage3(cfg):
     if results:
         print_header("QE Stage 3 – Results")
         summarise_eos(results)
-        _save_dat(os.path.join(stage_dir, "results.dat"),
-                  ["frac","a_ang","vol_A3","E_eV"], results)
-        bm_fit(results, stage_dir)
+        _save_dat(os.path.join(stage_dir, "results.dat"), ["frac", "scale", "vol_A3", "E_eV"], results)
+        bm_fit(results, stage_dir, struct)
     return results
-
 
 # ══════════════════════════════════════════════════════════════════
 #  STAGE RUNNERS  –  SIESTA
 # ══════════════════════════════════════════════════════════════════
-
-def sia_mpi_cmd(exe, procs, fdf, out, err):
-    return f"mpirun -np {procs} {exe} < {fdf} > {out} 2> {err}"
-
-
 def sia_run_stage(cfg, stage_id, label, param_list, fdf_gen, parse_fn, done_fn,
                   results_key, display_label, summarise_fn):
-    exe, procs, pseudo_dir, base = (
-        cfg["exe"], cfg["procs"], cfg["pseudo_dir"], cfg["base"])
+    exe, procs, pseudo_dir, base, struct = (
+        cfg["exe"], cfg["procs"], cfg["pseudo_dir"], cfg["base"], cfg["struct"])
     stage_dir = os.path.join(base, f"siesta_0{stage_id}_{label}")
     results = []
 
@@ -818,11 +827,10 @@ def sia_run_stage(cfg, stage_id, label, param_list, fdf_gen, parse_fn, done_fn,
         err_path  = os.path.join(subdir, "error.err")
         os.makedirs(subdir, exist_ok=True)
         write_file(fdf_path, fdf_gen(cfg, params))
-        sia_copy_pseudos(subdir, pseudo_dir)
-        print(f"  → {display_label} = {params['display']} ... ",
-              end="", flush=True)
+        sia_copy_pseudos(subdir, pseudo_dir, struct.species)
+        print(f"  → {display_label} = {params['display']} ... ", end="", flush=True)
         cmd = sia_mpi_cmd(exe, procs, "input.fdf", "output.out", "error.err")
-        t   = run_cmd(f"cd {subdir} && {cmd}", os.path.join(subdir,"runner.log"))
+        t = run_cmd(f"cd {subdir} && {cmd}", os.path.join(subdir, "runner.log"))
         if done_fn(out_path):
             e = parse_fn(out_path)
             if e is not None:
@@ -835,123 +843,115 @@ def sia_run_stage(cfg, stage_id, label, param_list, fdf_gen, parse_fn, done_fn,
 
     if results:
         summarise_fn(results)
-        _save_dat(os.path.join(stage_dir, "results.dat"),
-                  results_key, results)
+        _save_dat(os.path.join(stage_dir, "results.dat"), results_key, results)
     return results
 
-
 def sia_run_stage1(cfg):
-    print_header("SIESTA Stage 1 – MeshCutoff convergence")
-    print(f"  k-mesh: {SIA_KG_4MTEST}  |  BasisSize: {SIA_BASIS_FIXED}  "
-          f"|  EnergyShift: {SIA_ESHIFT_FIXED} Ry")
+    struct = cfg["struct"]
+    print_header(f"SIESTA Stage 1 – MeshCutoff convergence ({struct.formula})")
+    print(f"  k-mesh: {SIA_KG_4MTEST}  |  BasisSize: {SIA_BASIS_FIXED}  |  EnergyShift: {SIA_ESHIFT_FIXED} Ry")
 
     def fdf_gen(cfg, p):
-        return sia_input(cfg["pseudo_dir"], p["mc"], SIA_KG_4MTEST,
+        return sia_input(cfg["pseudo_dir"], struct, p["mc"], SIA_KG_4MTEST,
                          SIA_BASIS_FIXED, SIA_ESHIFT_FIXED)
 
-    params = [{"label":f"meshcut_{mc}Ry","display":str(mc),
-               "mc":mc,"key":[mc]} for mc in SIA_MESHCUT]
+    params = [{"label": f"meshcut_{mc}Ry", "display": str(mc),
+               "mc": mc, "key": [mc]} for mc in SIA_MESHCUT]
 
     def summ(results):
-        summarise_ecut([(r[0], r[1]) for r in results], EV2MEV, "meV")
+        summarise_ecut([(r[0], r[1]) for r in results], EV2MEV, struct.nat)
 
     return sia_run_stage(cfg, 1, "meshcutoff", params, fdf_gen,
                          sia_parse_energy, sia_job_done,
-                         ["meshcut_Ry","E_eV"], "MeshCutoff (Ry)", summ)
-
+                         ["meshcut_Ry", "E_eV"], "MeshCutoff (Ry)", summ)
 
 def sia_run_stage2(cfg):
-    print_header("SIESTA Stage 2 – k-point mesh convergence")
-    print(f"  MeshCutoff: {SIA_MC_4KTEST} Ry  |  BasisSize: {SIA_BASIS_FIXED}")
+    struct = cfg["struct"]
+    print_header(f"SIESTA Stage 2 – k-point mesh convergence ({struct.formula})")
+    print(f"  MeshCutoff: {SIA_MC_4KTEST} Ry  |  BasisSize: {SIA_BASIS_FIXED}  |  EnergyShift: {SIA_ESHIFT_FIXED} Ry")
 
     def fdf_gen(cfg, p):
-        return sia_input(cfg["pseudo_dir"], SIA_MC_4KTEST, p["kg"],
+        return sia_input(cfg["pseudo_dir"], struct, SIA_MC_4KTEST, p["kg"],
                          SIA_BASIS_FIXED, SIA_ESHIFT_FIXED)
 
-    params = [{"label":f"kgrid_{'x'.join(str(k) for k in kg)}",
-               "display":"×".join(str(k) for k in kg),
-               "kg":kg,"key":["×".join(str(k) for k in kg)]}
+    params = [{"label": f"kgrid_{'x'.join(str(k) for k in kg)}",
+               "display": "x".join(str(k) for k in kg),
+               "kg": kg, "key": ["x".join(str(k) for k in kg)]}
               for kg in SIA_KGRIDS]
 
     def summ(results):
-        summarise_kpoints([(r[0], r[1]) for r in results])
+        summarise_kpoints([(r[0], r[1]) for r in results], struct.nat)
 
     return sia_run_stage(cfg, 2, "kpoints", params, fdf_gen,
                          sia_parse_energy, sia_job_done,
-                         ["k_mesh","E_eV"], "k-mesh", summ)
-
+                         ["kgrid", "E_eV"], "k-grid", summ)
 
 def sia_run_stage3(cfg):
-    print_header("SIESTA Stage 3 – PAO.BasisSize convergence")
-    print(f"  MeshCutoff: {SIA_MC_4KTEST} Ry  |  k-mesh: {SIA_KG_4BASIS}")
+    struct = cfg["struct"]
+    print_header(f"SIESTA Stage 3 – Basis set convergence ({struct.formula})")
+    print(f"  MeshCutoff: {SIA_MC_4KTEST} Ry  |  k-mesh: {SIA_KG_4BASIS}  |  EnergyShift: {SIA_ESHIFT_FIXED} Ry")
 
     def fdf_gen(cfg, p):
-        return sia_input(cfg["pseudo_dir"], SIA_MC_4KTEST, SIA_KG_4BASIS,
+        return sia_input(cfg["pseudo_dir"], struct, SIA_MC_4KTEST, SIA_KG_4BASIS,
                          p["bs"], SIA_ESHIFT_FIXED)
 
-    params = [{"label":f"basis_{bs}","display":bs,
-               "bs":bs,"key":[bs]} for bs in SIA_BASIS]
+    params = [{"label": f"basis_{bs}", "display": bs,
+               "bs": bs, "key": [bs]} for bs in SIA_BASIS]
 
     def summ(results):
-        summarise_basissize([(r[0], r[1]) for r in results])
+        summarise_basissize([(r[0], r[1]) for r in results], struct.nat)
 
     return sia_run_stage(cfg, 3, "basissize", params, fdf_gen,
                          sia_parse_energy, sia_job_done,
-                         ["basis","E_eV"], "PAO.BasisSize", summ)
-
+                         ["basis", "E_eV"], "PAO.BasisSize", summ)
 
 def sia_run_stage4(cfg):
-    print_header("SIESTA Stage 4 – PAO.EnergyShift convergence")
-    print(f"  MeshCutoff: {SIA_MC_4KTEST} Ry  |  k-mesh: {SIA_KG_4ESHIFT}  "
-          f"|  BasisSize: {SIA_BASIS_FIXED}")
+    struct = cfg["struct"]
+    print_header(f"SIESTA Stage 4 – PAO.EnergyShift convergence ({struct.formula})")
+    print(f"  MeshCutoff: {SIA_MC_4KTEST} Ry  |  k-mesh: {SIA_KG_4ESHIFT}  |  BasisSize: {SIA_BASIS_FIXED}")
 
     def fdf_gen(cfg, p):
-        return sia_input(cfg["pseudo_dir"], SIA_MC_4KTEST, SIA_KG_4ESHIFT,
+        return sia_input(cfg["pseudo_dir"], struct, SIA_MC_4KTEST, SIA_KG_4ESHIFT,
                          SIA_BASIS_FIXED, p["es"])
 
-    params = [{"label":f"eshift_{es}Ry","display":f"{es} Ry",
-               "es":es,"key":[es]} for es in SIA_ESHIFT]
+    params = [{"label": f"eshift_{es}Ry", "display": f"{es} Ry",
+               "es": es, "key": [es]} for es in SIA_ESHIFT]
 
     def summ(results):
-        summarise_ecut([(r[0], r[1]) for r in results], EV2MEV, "meV")
+        summarise_energyshift([(r[0], r[1]) for r in results], struct.nat)
 
     return sia_run_stage(cfg, 4, "energyshift", params, fdf_gen,
                          sia_parse_energy, sia_job_done,
-                         ["eshift_Ry","E_eV"], "EnergyShift (Ry)", summ)
-
+                         ["eshift_Ry", "E_eV"], "PAO.EnergyShift", summ)
 
 def sia_run_stage5(cfg):
-    print_header("SIESTA Stage 5 – Lattice vs Energy  (EOS scan)")
-    print(f"  MeshCutoff: {SIA_MC_4EOS} Ry  |  k-mesh: {SIA_KG_4EOS}  "
-          f"|  BasisSize: {SIA_BASIS_4EOS}  |  CG steps: {EOS_CG_STEPS}")
+    struct = cfg["struct"]
+    print_header(f"SIESTA Stage 5 – Equation of State Scan ({struct.formula})")
+    print(f"  MeshCutoff: {SIA_MC_4EOS} Ry  |  k-mesh: {SIA_KG_4EOS}  |  Basis: {SIA_BASIS_4EOS}")
 
     def fdf_gen(cfg, p):
-        return sia_input(cfg["pseudo_dir"], SIA_MC_4EOS, SIA_KG_4EOS,
+        return sia_input(cfg["pseudo_dir"], struct, SIA_MC_4EOS, SIA_KG_4EOS,
                          SIA_BASIS_4EOS, SIA_ES_4EOS,
-                         a_ang=p["a"], cg_steps=EOS_CG_STEPS)
+                         scale=p["scale"], cg_steps=EOS_CG_STEPS)
 
     params = []
     for frac in EOS_FRACS:
-        a_new = A_ANG * (frac ** (1.0/3.0))
-        vol   = a_new ** 3
-        params.append({"label":f"vol_{frac:.3f}",
-                        "display":f"{frac:.3f}  (a={a_new:.5f} Å)",
-                        "a":a_new,"key":[frac, a_new, vol]})
+        scale = frac ** (1.0 / 3.0)
+        vol = struct.volume * frac
+        params.append({"label": f"vol_{frac:.3f}",
+                       "display": f"{frac:.3f} (V={vol:.2f} Å³)",
+                       "scale": scale,
+                       "key": [frac, scale, vol]})
 
     def summ(results):
-        summarise_eos([(r[0],r[1],r[2],r[3]) for r in results])
+        summarise_eos([(r[0], r[1], r[2], r[3]) for r in results])
         stage_dir = os.path.join(cfg["base"], "siesta_05_eos")
-        bm_fit([(r[0],r[1],r[2],r[3]) for r in results], stage_dir)
+        bm_fit([(r[0], r[1], r[2], r[3]) for r in results], stage_dir, struct)
 
     return sia_run_stage(cfg, 5, "eos", params, fdf_gen,
                          sia_parse_energy, sia_job_done,
-                         ["frac","a_ang","vol_A3","E_eV"],
+                         ["frac", "scale", "vol_A3", "E_eV"],
                          "Vol fraction", summ)
-
-
-# ══════════════════════════════════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════════════════════════════════
 
 def _save_dat(path, headers, rows):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -960,29 +960,60 @@ def _save_dat(path, headers, rows):
         for row in rows:
             f.write("  ".join(str(v) for v in row) + "\n")
 
-
 def banner():
     print(c("header", """
 ╔══════════════════════════════════════════════════════════════════╗
-║         DFT CONVERGENCE SUITE  ─  FAPbI3 Cubic Perovskite        ║
-║         Supports:  Quantum ESPRESSO  &  SIESTA 5.x               ║
+║         DFT CONVERGENCE SUITE  ─  Universal Crystal Edition      ║
+║         Supports:  Quantum ESPRESSO  &  SIESTA                   ║
 ╚══════════════════════════════════════════════════════════════════╝
 """))
-
 
 # ══════════════════════════════════════════════════════════════════
 #  INTERACTIVE SETUP
 # ══════════════════════════════════════════════════════════════════
-
 def interactive_setup():
     banner()
     cpu_count = os.cpu_count() or 1
 
-    print(c("bold", "  ── Step 1 : Choose DFT code ──────────────────────────"))
+    # ── Step 1: Crystal Structure CIF ──
+    print(c("bold", "  ── Step 1 : Crystal structure (CIF) ───────────────────"))
+    cif_files = [f for f in os.listdir(".") if f.lower().endswith(".cif")]
+    cif_files.sort()
+    default_cif = cif_files[0] if cif_files else "structure.cif"
+    if cif_files:
+        print("  Found CIF files in current directory:")
+        for idx, f in enumerate(cif_files, 1):
+            print(f"    {idx}) {f}")
+        raw = ask(f"Select number or enter path to CIF file", "1")
+        if raw.isdigit() and 1 <= int(raw) <= len(cif_files):
+            cif_path = cif_files[int(raw) - 1]
+        else:
+            cif_path = raw
+    else:
+        cif_path = ask("Path to CIF file", default_cif)
+
+    if not os.path.isfile(cif_path):
+        print(c("err", f"  ERROR: CIF file '{cif_path}' not found."))
+        sys.exit(1)
+
+    struct = Structure(cif_path)
+    print()
+    print(c("ok", f"  ✓ Loaded crystal structure from: {cif_path}"))
+    print(f"    Chemical formula : {struct.formula}")
+    print(f"    Lattice params   : a={struct.cellpar[0]:.4f} Å, b={struct.cellpar[1]:.4f} Å, c={struct.cellpar[2]:.4f} Å")
+    print(f"    Cell angles      : α={struct.cellpar[3]:.1f}°, β={struct.cellpar[4]:.1f}°, γ={struct.cellpar[5]:.1f}°")
+    print(f"    Unit cell volume : {struct.volume:.3f} Å³")
+    print(f"    Total atoms (nat): {struct.nat}")
+    print(f"    Unique elements  : {', '.join(struct.species)}  ({struct.ntyp} species)")
+
+    # ── Step 2: DFT Code ──
+    print()
+    print(c("bold", "  ── Step 2 : Choose DFT code ──────────────────────────"))
     code = ask_choice("Which code?", ["QE", "SIESTA"])
 
+    # ── Step 3: Executable path ──
     print()
-    print(c("bold", "  ── Step 2 : Executable path ───────────────────────────"))
+    print(c("bold", "  ── Step 3 : Executable path ───────────────────────────"))
     if code == "QE":
         auto = detect_exe(["pw.x"])
         exe  = ask("Path to pw.x", auto or "/path/to/pw.x")
@@ -991,13 +1022,12 @@ def interactive_setup():
         exe  = ask("Path to siesta", auto or "/path/to/siesta")
 
     if not os.path.isfile(exe):
-        print(c("warn", f"  WARNING: '{exe}' not found – inputs will be generated "
-                "but calculations will fail."))
+        print(c("warn", f"  WARNING: '{exe}' not found – inputs will be generated but runs will fail."))
 
+    # ── Step 4: Pseudopotential directory ──
     print()
-    print(c("bold", "  ── Step 3 : Pseudopotential directory ──────────────────"))
+    print(c("bold", "  ── Step 4 : Pseudopotential directory ──────────────────"))
     if code == "QE":
-        # auto-guess: prefer burai, then $QE_HOME/pseudo
         qe_home  = os.environ.get("QE_HOME", "")
         auto_ps  = os.path.join(qe_home, "pseudo") if qe_home else ""
         burai_ps = os.path.expanduser("~/.burai/.pseudopot")
@@ -1005,11 +1035,10 @@ def interactive_setup():
             auto_ps = burai_ps
         pseudo_dir = ask("Path to directory containing .UPF pseudopotentials",
                          auto_ps or "/path/to/upf_pseudos")
-        # report what was found
         print()
-        print("  Checking UPF pseudopotentials ...")
+        print(f"  Scanning for UPF pseudopotentials for elements in {struct.formula} ...")
         found_all = True
-        for sp in ["C","H","N","Pb","I"]:
+        for sp in struct.species:
             try:
                 f = find_qe_upf(pseudo_dir, sp)
                 print(c("ok", f"    {sp:3s}  ✓  {f}"))
@@ -1017,54 +1046,52 @@ def interactive_setup():
                 print(c("err", f"    {sp:3s}  ✗  NOT FOUND in {pseudo_dir}"))
                 found_all = False
         if not found_all:
-            print(c("warn", "\n  Some pseudopotentials missing – fix before running."))
+            print(c("warn", "\n  Some UPFs are missing – calculations may fail."))
     else:
-        # SIESTA: auto-guess nc-sr-05 library next to siesta binary
         sia_dir  = os.path.dirname(exe) if exe else ""
-        nc_guess = os.path.join(os.path.dirname(sia_dir),
-                                "nc-sr-05_pbe_standard_psml")
+        nc_guess = os.path.join(os.path.dirname(sia_dir), "nc-sr-05_pbe_standard_psml")
         if not os.path.isdir(nc_guess):
             nc_guess = ""
-        pseudo_dir = ask(
-            "Path to directory containing .psml OR .psf pseudopotentials",
-            nc_guess or "/path/to/pseudo_dir")
-        # detect format and report
+        pseudo_dir = ask("Path to directory containing .psml OR .psf pseudopotentials",
+                         nc_guess or "/path/to/pseudo_dir")
         print()
-        print("  Scanning for pseudopotentials (PSML preferred, PSF fallback) ...")
-        fmt, found, missing = detect_sia_pseudo_format(pseudo_dir)
-        for sp in ["C","H","N","Pb","I"]:
+        print(f"  Scanning for pseudopotentials for elements in {struct.formula} ...")
+        fmt, found, missing = detect_sia_pseudo_format(pseudo_dir, struct.species)
+        for sp in struct.species:
             if sp in found:
                 src, ext = found[sp]
-                tag = c("ok",   f"✓  {os.path.basename(src):<30} [{ext[1:].upper()}]")
+                tag = c("ok", f"✓  {os.path.basename(src):<30} [{ext[1:].upper()}]")
             else:
                 tag = c("err", f"✗  NOT FOUND  (.psml and .psf both absent)")
             print(f"    {sp:3s}  {tag}")
         if fmt == "NONE":
             print(c("err", "\n  No pseudopotentials found – check the directory."))
         elif missing:
-            print(c("err",  f"\n  Missing species: {missing}"))
+            print(c("err", f"\n  Missing species: {missing}"))
         elif fmt == "MIXED":
             print(c("warn", f"\n  Mixed formats (PSML+PSF). Will use best available per species."))
         else:
-            print(c("ok",   f"\n  All 5 pseudopotentials found  [{fmt} format]."))
+            print(c("ok", f"\n  All {len(struct.species)} pseudopotentials found [{fmt} format]."))
 
+    # ── Step 5: MPI & Threading ──
     print()
-    print(c("bold", "  ── Step 4 : MPI / threading ────────────────────────────"))
+    print(c("bold", "  ── Step 5 : MPI / threading ────────────────────────────"))
     print(f"  Detected CPU count: {cpu_count}")
     procs = ask_int("Number of MPI processes", cpu_count // 2 or 1)
-
     omp = 1
     if code == "QE":
         omp = ask_int("OpenMP threads per MPI task (1 = pure MPI)", 1)
 
+    # ── Step 6: Output Directory ──
     print()
-    print(c("bold", "  ── Step 5 : Output directory ───────────────────────────"))
-    base = ask("Output base directory", os.path.join(os.getcwd(),
-               "convergence_results"))
+    print(c("bold", "  ── Step 6 : Output directory ───────────────────────────"))
+    default_out = os.path.join(os.getcwd(), f"{struct.prefix}_convergence")
+    base = ask("Output base directory", default_out)
     os.makedirs(base, exist_ok=True)
 
+    # ── Step 7: Stages ──
     print()
-    print(c("bold", "  ── Step 6 : Select stages to run ───────────────────────"))
+    print(c("bold", "  ── Step 7 : Select stages to run ───────────────────────"))
     if code == "QE":
         print("    1) ecutwfc convergence")
         print("    2) k-point mesh convergence")
@@ -1081,24 +1108,22 @@ def interactive_setup():
     max_stage = 3 if code == "QE" else 5
     raw = ask("Enter stage numbers separated by spaces (e.g. 1 2 3) or A for all", "A")
     if raw.upper() == "A":
-        stages = list(range(1, max_stage+1))
+        stages = list(range(1, max_stage + 1))
     else:
         stages = sorted(set(int(x) for x in raw.split() if x.isdigit()))
         stages = [s for s in stages if 1 <= s <= max_stage]
 
+    # ── Summary ──
     print()
     print(c("bold", "  ─── Configuration Summary ─────────────────────────────"))
+    print(f"  Structure      : {struct.filename}  ({struct.formula}, {struct.nat} atoms)")
+    print(f"  Lattice Volume : {struct.volume:.3f} Å³")
     print(f"  Code           : {code}")
     print(f"  Executable     : {exe}")
-    if code == "SIESTA":
-        fmt, _, _ = detect_sia_pseudo_format(pseudo_dir)
-        print(f"  Pseudo dir     : {pseudo_dir}")
-        print(f"  Pseudo format  : {fmt}  (.psml preferred, .psf fallback per species)")
-    else:
-        print(f"  Pseudo dir     : {pseudo_dir}  (.UPF, auto-selected per element)")
+    print(f"  Pseudo dir     : {pseudo_dir}")
     print(f"  MPI processes  : {procs}")
     if code == "QE":
-        print(f"  OMP threads    : {omp}  (total cores used: {procs*omp})")
+        print(f"  OMP threads    : {omp}  (total cores used: {procs * omp})")
     print(f"  Output dir     : {base}")
     print(f"  Stages to run  : {stages}")
     print()
@@ -1109,6 +1134,7 @@ def interactive_setup():
         sys.exit(0)
 
     return {
+        "struct":     struct,
         "code":       code,
         "exe":        exe,
         "pseudo_dir": pseudo_dir,
@@ -1118,15 +1144,14 @@ def interactive_setup():
         "stages":     stages,
     }
 
-
 # ══════════════════════════════════════════════════════════════════
-#  MAIN
+#  MAIN ENTRY POINT
 # ══════════════════════════════════════════════════════════════════
-
 def main():
     cfg = interactive_setup()
     code   = cfg["code"]
     stages = cfg["stages"]
+    struct = cfg["struct"]
     t_start = time.time()
 
     if code == "QE":
@@ -1145,29 +1170,18 @@ def main():
         }
 
     for s in stages:
-        if s in runners:
-            runners[s](cfg)
-        else:
-            print(c("warn", f"  Unknown stage {s} – skipped."))
+        runners[s](cfg)
 
-    total = round(time.time() - t_start)
-    print_header("ALL DONE")
-    print(f"  Total wall time : {total} s  ({total//60} min {total%60} s)")
-    print(f"  Results in      : {cfg['base']}/")
-    print()
-    print("  File structure:")
-    if code == "QE":
-        print("  ├── qe_01_ecut/       results.dat")
-        print("  ├── qe_02_kpoints/    results.dat")
-        print("  └── qe_03_eos/        results.dat  eos_fit_curve.dat")
-    else:
-        print("  ├── siesta_01_meshcutoff/   results.dat")
-        print("  ├── siesta_02_kpoints/      results.dat")
-        print("  ├── siesta_03_basissize/    results.dat")
-        print("  ├── siesta_04_energyshift/  results.dat")
-        print("  └── siesta_05_eos/          results.dat  eos_fit_curve.dat")
-    print()
+    total_time = round(time.time() - t_start)
+    m, sec = divmod(total_time, 60)
+    h, m   = divmod(m, 60)
 
+    print()
+    print(c("ok", "═" * 64))
+    print(c("ok", f"  CONVERGENCE SUITE COMPLETE for {struct.formula}"))
+    print(c("ok", f"  Total runtime : {h:02d}h {m:02d}m {sec:02d}s"))
+    print(c("ok", f"  Results saved : {cfg['base']}"))
+    print(c("ok", "═" * 64))
 
 if __name__ == "__main__":
     main()
