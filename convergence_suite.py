@@ -264,20 +264,20 @@ QE_ECUT_LIST    = [40, 50, 60, 70, 80, 90, 100]       # Ry
 QE_ECUT_DUAL    = 8                                   # ecutrho = dual * ecutwfc
 QE_KGRIDS       = [(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6),(7,7,7)]
 QE_ECUT_4KTEST  = 50                                  # Ry
-QE_KGRID_4ETEST = (3,3,3)
+QE_KGRID_4ETEST = (1,1,1)
 QE_ECUT_4EOS    = 70                                  # Ry
-QE_KGRID_4EOS   = (4,4,4)
+QE_KGRID_4EOS   = (1,1,1)
 
 SIA_MESHCUT     = [100, 150, 200, 250, 300, 350, 400, 500]  # Ry
 SIA_KGRIDS      = [(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6),(7,7,7)]
 SIA_BASIS       = ["SZ", "DZ", "DZP", "TZP"]
 SIA_ESHIFT      = ["0.005", "0.010", "0.020", "0.050", "0.100"]  # Ry
-SIA_MC_4KTEST   = 300
-SIA_KG_4MTEST   = (3,3,3)
-SIA_KG_4BASIS   = (4,4,4)
-SIA_KG_4ESHIFT  = (4,4,4)
-SIA_MC_4EOS     = 300
-SIA_KG_4EOS     = (4,4,4)
+SIA_MC_4KTEST   = 400
+SIA_KG_4MTEST   = (1,1,1)
+SIA_KG_4BASIS   = (1,1,1)
+SIA_KG_4ESHIFT  = (1,1,1)
+SIA_MC_4EOS     = 400
+SIA_KG_4EOS     = (1,1,1)
 SIA_BASIS_4EOS  = "DZP"
 SIA_ES_4EOS     = "0.010"
 SIA_ESHIFT_FIXED = "0.020"
@@ -752,6 +752,21 @@ def bm_fit(data, outdir, struct):
         f.write("# V_A3      E_fit_eV\n")
         for v in v_dense:
             f.write(f"  {v:.6f}  {bm_eos(v, E0_fit, B0_fit, B0p_fit, V0_fit):.8f}\n")
+
+    # Write machine-readable fit summary (used by vc-relax generator)
+    summary_path = os.path.join(outdir, "bm_fit.txt")
+    with open(summary_path, "w") as f:
+        f.write(f"# Birch-Murnaghan EOS fit summary for {struct.formula}\n")
+        f.write(f"# method = {'BM3' if fit_ok else 'parabolic_fallback'}\n")
+        f.write(f"V0      = {V0_fit:.8f}   # Angstrom^3  equilibrium volume\n")
+        f.write(f"scale   = {scale_fit:.10f}  # linear scale factor  a_theory/a_expt\n")
+        f.write(f"a0      = {a_fit:.8f}   # Angstrom  theoretical lattice a\n")
+        f.write(f"b0      = {b_fit:.8f}   # Angstrom  theoretical lattice b\n")
+        f.write(f"c0      = {c_fit:.8f}   # Angstrom  theoretical lattice c\n")
+        f.write(f"E0      = {E0_fit:.8f}   # eV        ground-state energy\n")
+        f.write(f"B0_GPa  = {B0_gpa:.4f}      # GPa       bulk modulus\n")
+        f.write(f"B0prime = {B0p_fit:.4f}      # dimensionless  pressure derivative\n")
+    print(c("ok", f"  ✓ BM fit summary written to     : {summary_path}"))
     print(c("ok", f"\n  ✓ Fit parameters and curve saved to: {fit_path}"))
 
 # ══════════════════════════════════════════════════════════════════
@@ -771,6 +786,15 @@ def qe_run_stage1(cfg):
         inp = os.path.join(subdir, "input.in")
         out = os.path.join(subdir, "output.out")
         os.makedirs(os.path.join(subdir, "out"), exist_ok=True)
+
+        # ── Resume: skip if output already completed ──────────────
+        if qe_job_done(out):
+            e_ry = qe_parse_energy(out)
+            if e_ry is not None:
+                results.append((ecut, e_ry))
+                print(f"  → ecutwfc = {ecut:3d} Ry ... " + c("ok", f"[CACHED]  E = {e_ry:.8f} Ry"))
+                continue
+
         write_file(inp, qe_input(pseudo_dir, struct, ecut, QE_KGRID_4ETEST))
         cmd = qe_mpi_cmd(exe, procs, omp, qe_npool(QE_KGRID_4ETEST), "input.in", "output.out")
         print(f"  → ecutwfc = {ecut:3d} Ry ... ", end="", flush=True)
@@ -803,6 +827,16 @@ def qe_run_stage2(cfg):
         inp = os.path.join(subdir, "input.in")
         out = os.path.join(subdir, "output.out")
         os.makedirs(os.path.join(subdir, "out"), exist_ok=True)
+
+        # ── Resume: skip if output already completed ──────────────
+        if qe_job_done(out):
+            e_ev = qe_parse_energy(out)
+            if e_ev is not None:
+                e_ev = e_ev * RY2EV
+                results.append((kg_str, e_ev))
+                print(f"  → k-mesh {kg_str} ... " + c("ok", f"[CACHED]  E = {e_ev:.8f} eV"))
+                continue
+
         write_file(inp, qe_input(pseudo_dir, struct, QE_ECUT_4KTEST, kg))
         cmd = qe_mpi_cmd(exe, procs, omp, qe_npool(kg), "input.in", "output.out")
         print(f"  → k-mesh {kg_str} ... ", end="", flush=True)
@@ -837,6 +871,16 @@ def qe_run_stage3(cfg):
         inp = os.path.join(subdir, "input.in")
         out = os.path.join(subdir, "output.out")
         os.makedirs(os.path.join(subdir, "out"), exist_ok=True)
+
+        # ── Resume: skip if output already completed ──────────────
+        if qe_job_done(out):
+            e_ev = qe_parse_energy(out)
+            if e_ev is not None:
+                e_ev = e_ev * RY2EV
+                results.append((frac, scale, vol, e_ev))
+                print(f"  → frac={frac:.3f}  V={vol:.2f} Å³ ... " + c("ok", f"[CACHED]  E = {e_ev:.8f} eV"))
+                continue
+
         write_file(inp, qe_input(pseudo_dir, struct, QE_ECUT_4EOS, QE_KGRID_4EOS,
                                 scale=scale, calc="relax"))
         cmd = qe_mpi_cmd(exe, procs, omp, qe_npool(QE_KGRID_4EOS), "input.in", "output.out")
@@ -873,6 +917,16 @@ def sia_run_stage(cfg, stage_id, label, param_list, fdf_gen, parse_fn, done_fn,
         out_path  = os.path.join(subdir, "output.out")
         err_path  = os.path.join(subdir, "error.err")
         os.makedirs(subdir, exist_ok=True)
+
+        # ── Resume: skip if output already completed ──────────────
+        if done_fn(out_path):
+            e = parse_fn(out_path)
+            if e is not None:
+                results.append(params["key"] + [e])
+                print(f"  → {display_label} = {params['display']} ... "
+                      + c("ok", f"[CACHED]  E = {e:.8f} eV"))
+                continue
+
         write_file(fdf_path, fdf_gen(cfg, params))
         sia_copy_pseudos(subdir, pseudo_dir, struct.species)
         print(f"  → {display_label} = {params['display']} ... ", end="", flush=True)
@@ -1006,6 +1060,529 @@ def _save_dat(path, headers, rows):
         f.write("# " + "  ".join(str(h) for h in headers) + "\n")
         for row in rows:
             f.write("  ".join(str(v) for v in row) + "\n")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  CONVERGED PARAMETER PICKER
+# ══════════════════════════════════════════════════════════════════
+def _read_dat(path):
+    """Parse a .dat results file → list of dicts keyed by header names."""
+    if not os.path.isfile(path):
+        return []
+    rows = []
+    headers = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                headers = line.lstrip("# ").split()
+                continue
+            parts = line.split()
+            if headers and len(parts) == len(headers):
+                rows.append(dict(zip(headers, parts)))
+    return rows
+
+
+def _pick_ecut_qe(base):
+    """Return converged ecutwfc (Ry) from QE stage 1 dat, else None."""
+    rows = _read_dat(os.path.join(base, "qe_01_ecut", "results.dat"))
+    if not rows:
+        return None
+    energies = [(float(r["ecutwfc"]), float(r["E_eV"])) for r in rows if "ecutwfc" in r and "E_eV" in r]
+    if len(energies) < 2:
+        return int(energies[-1][0]) if energies else None
+    nat = 1  # relative ΔE check; we use total ΔE/nat ratio implicitly
+    for i in range(1, len(energies)):
+        delta = abs(energies[i][1] - energies[i-1][1]) * 1000  # meV
+        if delta < 1.0:
+            return int(energies[i][0])
+    return int(energies[-1][0])
+
+
+def _pick_kgrid_qe(base):
+    """Return converged k-grid tuple from QE stage 2 dat, else None."""
+    rows = _read_dat(os.path.join(base, "qe_02_kpoints", "results.dat"))
+    if not rows:
+        return None
+    grids = []
+    for r in rows:
+        if "kgrid" in r and "E_eV" in r:
+            parts = r["kgrid"].split("x")
+            if len(parts) == 3:
+                grids.append((tuple(int(k) for k in parts), float(r["E_eV"])))
+    if len(grids) < 2:
+        return grids[-1][0] if grids else None
+    for i in range(1, len(grids)):
+        delta = abs(grids[i][1] - grids[i-1][1]) * 1000
+        if delta < 0.5:
+            return grids[i][0]
+    return grids[-1][0]
+
+
+def _pick_meshcut_sia(base):
+    """Return converged MeshCutoff (Ry) from SIESTA stage 1 dat, else None."""
+    rows = _read_dat(os.path.join(base, "siesta_01_meshcutoff", "results.dat"))
+    if not rows:
+        return None
+    energies = [(float(r["meshcut_Ry"]), float(r["E_eV"])) for r in rows if "meshcut_Ry" in r and "E_eV" in r]
+    if len(energies) < 2:
+        return int(energies[-1][0]) if energies else None
+    for i in range(1, len(energies)):
+        delta = abs(energies[i][1] - energies[i-1][1]) * 1000
+        if delta < 1.0:
+            return int(energies[i][0])
+    return int(energies[-1][0])
+
+
+def _pick_kgrid_sia(base):
+    """Return converged k-grid tuple from SIESTA stage 2 dat, else None."""
+    rows = _read_dat(os.path.join(base, "siesta_02_kpoints", "results.dat"))
+    if not rows:
+        return None
+    grids = []
+    for r in rows:
+        if "kgrid" in r and "E_eV" in r:
+            parts = r["kgrid"].split("x")
+            if len(parts) == 3:
+                grids.append((tuple(int(k) for k in parts), float(r["E_eV"])))
+    if len(grids) < 2:
+        return grids[-1][0] if grids else None
+    for i in range(1, len(grids)):
+        delta = abs(grids[i][1] - grids[i-1][1]) * 1000
+        if delta < 0.5:
+            return grids[i][0]
+    return grids[-1][0]
+
+
+def _pick_basis_sia(base):
+    """Return converged PAO.BasisSize from SIESTA stage 3 dat, else DZP."""
+    ORDER = {"SZ": 0, "DZ": 1, "DZP": 2, "TZP": 3}
+    rows = _read_dat(os.path.join(base, "siesta_03_basissize", "results.dat"))
+    if not rows:
+        return "DZP"
+    entries = [(r["basis"], float(r["E_eV"])) for r in rows if "basis" in r and "E_eV" in r]
+    entries.sort(key=lambda x: ORDER.get(x[0], 99))
+    if len(entries) < 2:
+        return entries[-1][0] if entries else "DZP"
+    for i in range(1, len(entries)):
+        delta = abs(entries[i][1] - entries[i-1][1]) * 1000
+        if delta < 1.0:
+            return entries[i][0]
+    return entries[-1][0]
+
+
+def _pick_eshift_sia(base):
+    """Return converged PAO.EnergyShift (Ry string) from SIESTA stage 4 dat, else 0.010."""
+    rows = _read_dat(os.path.join(base, "siesta_04_energyshift", "results.dat"))
+    if not rows:
+        return "0.010"
+    entries = [(float(r["eshift_Ry"]), float(r["E_eV"])) for r in rows if "eshift_Ry" in r and "E_eV" in r]
+    entries.sort(key=lambda x: -x[0])          # largest eshift first (coarsest → finest)
+    if len(entries) < 2:
+        return f"{entries[-1][0]:.3f}" if entries else "0.010"
+    for i in range(1, len(entries)):
+        delta = abs(entries[i][1] - entries[i-1][1]) * 1000
+        if delta < 1.0:
+            return f"{entries[i][0]:.3f}"
+    return f"{entries[-1][0]:.3f}"
+
+
+def _bm_scale(base, code):
+    """Read linear scale factor (a_theory/a_expt) from bm_fit.txt.
+    Returns float scale, or 1.0 if file absent (falls back to expt geometry)."""
+    stage = "siesta_05_eos" if code == "SIESTA" else "qe_03_eos"
+    fit_path = os.path.join(base, stage, "bm_fit.txt")
+    if not os.path.isfile(fit_path):
+        return 1.0
+    result = {}
+    with open(fit_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, _, rest = line.partition("=")
+            try:
+                result[key.strip()] = float(rest.split()[0])
+            except ValueError:
+                pass
+    return result.get("scale", 1.0)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  VC-RELAX INPUT GENERATORS
+# ══════════════════════════════════════════════════════════════════
+def generate_vc_relax_qe(cfg, params):
+    """Write QE vc-relax input + runner script into <base>/vc_relax_production/."""
+    struct     = cfg["struct"]
+    pseudo_dir = cfg["pseudo_dir"]
+    exe        = cfg["exe"]
+    procs      = cfg["procs"]
+    omp        = cfg["omp"]
+    base       = cfg["base"]
+
+    ecutwfc = params["ecutwfc"]
+    kg      = params["kgrid"]
+    ecutrho = QE_ECUT_DUAL * ecutwfc
+
+    npool = qe_npool(kg)
+    out_dir = os.path.join(base, "vc_relax_production")
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(os.path.join(out_dir, "out"), exist_ok=True)
+
+    # ── Use BM-fit theoretical lattice to avoid Pulay stress ──────
+    scale_fit = params.get("scale_fit", 1.0)
+    a_expt    = struct.cellpar[0]
+    a_theo    = a_expt * scale_fit
+    if abs(scale_fit - 1.0) > 1e-6:
+        scale_note = (f"!║  Start geometry: BM-fit theory  scale={scale_fit:.6f}  "
+                      f"a_expt={a_expt:.4f}→a0={a_theo:.4f} Ang")
+    else:
+        scale_note = "!║  Start geometry: experimental CIF  (EOS not available)"
+
+    # ── Build input ──────────────────────────────────────────────
+    cell_dof = (
+        "    cell_dofree      = 'all'           ! relax all cell degrees of freedom\n"
+    )
+    vdw_block = """\
+    vdw_corr          = 'dft-d3'
+    dftd3_version     = 4
+    dftd3_threebody   = .true.
+"""
+    inp = f"""\
+!╔══════════════════════════════════════════════════════════════════╗
+!║  QE Variable-Cell Relaxation  –  {struct.formula}
+!║  Generated by convergence_suite.py after convergence testing
+!║  Converged parameters:
+!║    ecutwfc  = {ecutwfc} Ry   (ecutrho = {ecutrho} Ry)
+!║    k-grid   = {kg[0]}x{kg[1]}x{kg[2]}
+{scale_note}
+!╚══════════════════════════════════════════════════════════════════╝
+&CONTROL
+    calculation   = 'vc-relax'
+    prefix        = '{struct.prefix}'
+    pseudo_dir    = '{pseudo_dir}'
+    outdir        = './out'
+    tstress       = .true.
+    tprnfor       = .true.
+    verbosity     = 'medium'
+    forc_conv_thr = 1.0d-4          ! Ry/Bohr  (~0.026 eV/Å)
+    etot_conv_thr = 1.0d-5          ! Ry
+    nstep         = 500
+    max_seconds   = 86400
+/
+&SYSTEM
+    ibrav         = 0
+    nat           = {struct.nat}
+    ntyp          = {struct.ntyp}
+    ecutwfc       = {ecutwfc}
+    ecutrho       = {ecutrho}
+    degauss       = 0.01
+    occupations   = 'smearing'
+    smearing      = 'gaussian'
+{vdw_block}/
+&ELECTRONS
+    conv_thr         = 1.0d-8
+    mixing_beta      = 0.40
+    electron_maxstep = 200
+    diagonalization  = 'david'
+    diago_david_ndim = 4
+/
+&IONS
+    ion_dynamics  = 'bfgs'
+/
+&CELL
+    cell_dynamics = 'bfgs'
+{cell_dof}/
+{struct.qe_cell_parameters(scale_fit)}
+{struct.qe_atomic_species(pseudo_dir)}
+{struct.qe_atomic_positions()}
+K_POINTS {{automatic}}
+  {kg[0]} {kg[1]} {kg[2]}  0 0 0
+"""
+    inp_path = os.path.join(out_dir, "vc_relax.in")
+    write_file(inp_path, inp)
+
+    # ── Runner script ─────────────────────────────────────────────
+    runner = f"""\
+#!/bin/bash
+# QE vc-relax runner for {struct.formula}
+# Converged parameters: ecutwfc={ecutwfc} Ry | k-grid {kg[0]}x{kg[1]}x{kg[2]}
+set -e
+cd "$(dirname "$0")"
+echo "Starting QE vc-relax for {struct.formula} at $(date)"
+OMP_NUM_THREADS={omp} mpirun -np {procs} {exe} {f"-nk {npool}" if npool > 1 else ""} \\
+    -in vc_relax.in > vc_relax.out 2>&1
+echo "Finished at $(date)"
+grep "Final enthalpy" vc_relax.out || grep "Final energy" vc_relax.out || true
+"""
+    run_path = os.path.join(out_dir, "run_vc_relax.sh")
+    write_file(run_path, runner)
+    os.chmod(run_path, 0o755)
+
+    return out_dir, inp_path, params
+
+
+def generate_vc_relax_sia(cfg, params):
+    """Write SIESTA vc-relax FDF + runner script into <base>/vc_relax_production/."""
+    struct     = cfg["struct"]
+    pseudo_dir = cfg["pseudo_dir"]
+    exe        = cfg["exe"]
+    procs      = cfg["procs"]
+    base       = cfg["base"]
+
+    meshcut = params["meshcut"]
+    kg      = params["kgrid"]
+    basis   = params["basis"]
+    eshift  = params["eshift"]
+
+    out_dir = os.path.join(base, "vc_relax_production")
+    os.makedirs(out_dir, exist_ok=True)
+    sia_copy_pseudos(out_dir, pseudo_dir, struct.species)
+
+    # ── Use BM-fit theoretical lattice to avoid Pulay stress ──────
+    scale_fit = params.get("scale_fit", 1.0)
+    a_expt    = struct.cellpar[0]
+    a_theo    = a_expt * scale_fit
+    if abs(scale_fit - 1.0) > 1e-6:
+        scale_note = (f"# ║  Start geometry: BM-fit theory  scale={scale_fit:.6f}  "
+                      f"a_expt={a_expt:.4f}→a0={a_theo:.4f} Ang")
+    else:
+        scale_note = "# ║  Start geometry: experimental CIF  (EOS not available)"
+
+    kg_str = f"{kg[0]}x{kg[1]}x{kg[2]}"
+
+    fdf = f"""\
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  SIESTA Variable-Cell Relaxation  –  {struct.formula}
+# ║  Generated by convergence_suite.py after convergence testing
+# ║  Converged parameters:
+# ║    MeshCutoff   = {meshcut} Ry
+# ║    k-grid       = {kg_str}
+# ║    PAO.BasisSize= {basis}
+# ║    EnergyShift  = {eshift} Ry
+{scale_note}
+# ╚══════════════════════════════════════════════════════════════════╝
+
+SystemName              {struct.prefix}_vcrelax
+SystemLabel             {struct.prefix}_vcrelax
+NumberOfAtoms           {struct.nat}
+NumberOfSpecies         {struct.ntyp}
+
+{struct.sia_species_block(out_dir)}
+
+{struct.sia_lattice_block(scale_fit)}
+
+{struct.sia_coords_block()}
+
+
+# ── DFT Functional & Dispersion ──────────────────────────────────
+XC.functional           GGA
+XC.authors              PBE
+
+DFT.D3                  true
+DFT.D3.version          4
+DFT.D3.damping          BJ
+DFT.D3.threebody        true
+
+# ── Real-Space Grid & Basis (Converged) ──────────────────────────
+MeshCutoff              {meshcut} Ry
+PAO.BasisType           split
+PAO.BasisSize           {basis}
+PAO.EnergyShift         {eshift} Ry
+
+# ── k-point Sampling (Converged) ─────────────────────────────────
+%block kgrid_Monkhorst_Pack
+  {kg[0]}  0  0  0.0
+  0  {kg[1]}  0  0.0
+  0  0  {kg[2]}  0.0
+%endblock kgrid_Monkhorst_Pack
+
+# ── Variable-Cell Geometry Relaxation ────────────────────────────
+MD.TypeOfRun            CG
+MD.NumCGsteps           2000
+MD.MaxForceTol          0.01 eV/Ang
+MD.MaxStressTol         0.50 kBar
+MD.VariableCell         T          ! Allow cell vectors to change (vc-relax)
+MD.ConstantVolume       F          ! Allow volume to change
+
+# ── SCF Convergence ──────────────────────────────────────────────
+SpinPolarized           F
+SolutionMethod          diagon
+MaxSCFIterations        300
+ElectronicTemperature   300 K
+SCF.MustConverge        true
+DM.MixingWeight         0.08
+DM.NumberPulay          5
+DM.Tolerance            1.0d-5
+DM.Require.Energy.Convergence T
+DM.Energy.Tolerance     1.0d-5 eV
+DM.UseSaveDM            T
+
+# ── Output ───────────────────────────────────────────────────────
+WriteForces             T
+WriteMullikenPop        1
+WriteCoorInitial        T
+WriteCoorStep           T          ! Full trajectory in SystemLabel.ANI
+WriteMDhistory          T
+XML.Write               T
+SaveHS                  F
+SaveRHO                 F
+"""
+    fdf_path = os.path.join(out_dir, "vc_relax.fdf")
+    write_file(fdf_path, fdf)
+
+    # ── Runner script ─────────────────────────────────────────────
+    runner = f"""\
+#!/bin/bash
+# SIESTA vc-relax runner for {struct.formula}
+# Converged: MeshCutoff={meshcut} Ry | k-grid {kg_str} | {basis} | EShift={eshift} Ry
+# NOTE: SIESTA 5.x writes trajectory to SystemLabel.MD_CAR (POSCAR multi-frame format)
+#       This script auto-converts it to SystemLabel.ANI (extended XYZ) for VESTA/VMD/ASE.
+set -e
+cd "$(dirname "$0")"
+echo "========================================================"
+echo " Starting SIESTA vc-relax for {struct.formula}"
+echo " Date: $(date)"
+echo "========================================================"
+mpirun -np {procs} {exe} < vc_relax.fdf > vc_relax.out 2> vc_relax.err
+echo "Finished at: $(date)"
+echo ""
+grep -E "outcell: Cell vector|outcell: Cell volume|Geom. converge|relaxation conver" vc_relax.out | tail -6 || true
+echo ""
+
+# ── Auto-convert MD_CAR trajectory → ANI (extended XYZ) ──────────
+MDCAR="{struct.prefix}_vcrelax.MD_CAR"
+ANI="{struct.prefix}_vcrelax.ANI"
+if [ -f "$MDCAR" ]; then
+    echo "Converting $MDCAR → $ANI ..."
+    python3 - <<'PYEOF'
+import ase, ase.io, numpy as np, sys, os
+src = "{struct.prefix}_vcrelax.MD_CAR"
+dst = "{struct.prefix}_vcrelax.ANI"
+# Read species order from ChemicalSpeciesLabel in vc_relax.fdf
+import re
+with open("vc_relax.fdf") as f:
+    fdf = f.read()
+sp_block = re.search(r'%block ChemicalSpeciesLabel(.*?)%endblock', fdf, re.DOTALL)
+sp_map = {{}}
+if sp_block:
+    for ln in sp_block.group(1).strip().split('\\n'):
+        parts = ln.split()
+        if len(parts) >= 3:
+            sp_map[int(parts[0])] = parts[2]
+# Parse multi-frame POSCAR
+with open(src) as f:
+    lines = f.readlines()
+frames = []
+i = 0
+while i < len(lines):
+    if lines[i].strip().startswith('---'):
+        i += 1
+        scale = float(lines[i].split()[0]); i += 1
+        a1 = [float(x) for x in lines[i].split()]; i += 1
+        a2 = [float(x) for x in lines[i].split()]; i += 1
+        a3 = [float(x) for x in lines[i].split()]; i += 1
+        counts = [int(x) for x in lines[i].split()]; i += 1
+        i += 1  # skip Direct/Cartesian
+        nat = sum(counts)
+        symbols = []
+        for idx, cnt in enumerate(counts, 1):
+            symbols += [sp_map.get(idx, '?')] * cnt
+        pos = []
+        for _ in range(nat):
+            pos.append([float(x) for x in lines[i].split()[:3]]); i += 1
+        cell = np.array([a1, a2, a3]) * scale
+        cart = np.dot(np.array(pos), cell)
+        frames.append(ase.Atoms(symbols=symbols, positions=cart, cell=cell, pbc=True))
+    else:
+        i += 1
+ase.io.write(dst, frames, format='extxyz')
+print(f"  {{len(frames)}} frames → {{dst}}  ({{os.path.getsize(dst)//1024}} KB)")
+PYEOF
+    echo "Done. Open $ANI in VESTA → File → Import Structure → select extxyz"
+else
+    echo "WARNING: $MDCAR not found - no trajectory written."
+fi
+"""
+    run_path = os.path.join(out_dir, "run_vc_relax.sh")
+    write_file(run_path, runner)
+    os.chmod(run_path, 0o755)
+
+    return out_dir, fdf_path, params
+
+
+# ══════════════════════════════════════════════════════════════════
+#  VC-RELAX DISPATCHER  (called from main after all stages done)
+# ══════════════════════════════════════════════════════════════════
+def generate_vc_relax(cfg):
+    """Pick converged parameters from completed stages and write vc-relax input."""
+    code   = cfg["code"]
+    base   = cfg["base"]
+    struct = cfg["struct"]
+
+    print()
+    print_header(f"Auto-Generating vc-relax Production Input  ({struct.formula})")
+    print(c("bold", "  Picking converged parameters from completed stage results...\n"))
+
+    if code == "QE":
+        ecutwfc   = _pick_ecut_qe(base) or QE_ECUT_4EOS
+        kg        = _pick_kgrid_qe(base) or QE_KGRID_4EOS
+        scale_fit = _bm_scale(base, "QE")
+
+        src_ecut  = "stage 1 data" if _pick_ecut_qe(base) else f"fallback ({QE_ECUT_4EOS} Ry)"
+        src_kg    = "stage 2 data" if _pick_kgrid_qe(base) else f"fallback {QE_KGRID_4EOS}"
+        src_scale = f"BM fit  a0={struct.cellpar[0]*scale_fit:.4f} Å" if abs(scale_fit-1.0) > 1e-6 else "experimental CIF (no EOS data)"
+
+        params = {"ecutwfc": ecutwfc, "kgrid": kg, "scale_fit": scale_fit}
+
+        print(f"  {'ecutwfc':<18}: {ecutwfc} Ry      ← {src_ecut}")
+        print(f"  {'k-grid':<18}: {'x'.join(str(k) for k in kg)}          ← {src_kg}")
+        print(f"  {'Lattice a0':<18}: {src_scale}  ← stage 3 BM fit")
+        print()
+
+        out_dir, inp_path, _ = generate_vc_relax_qe(cfg, params)
+
+        print(c("ok", f"  ✓ QE vc-relax input written  : {inp_path}"))
+        print(c("ok", f"  ✓ Runner script written      : {os.path.join(out_dir, 'run_vc_relax.sh')}"))
+        print()
+        print(c("bold", "  To launch:"))
+        print(f"    cd {out_dir}")
+        print(f"    ./run_vc_relax.sh")
+
+    else:  # SIESTA
+        meshcut   = _pick_meshcut_sia(base) or SIA_MC_4EOS
+        kg        = _pick_kgrid_sia(base)   or SIA_KG_4EOS
+        basis     = _pick_basis_sia(base)   or SIA_BASIS_4EOS
+        eshift    = _pick_eshift_sia(base)  or SIA_ES_4EOS
+        scale_fit = _bm_scale(base, "SIESTA")
+
+        src_mc    = "stage 1 data" if _read_dat(os.path.join(base, "siesta_01_meshcutoff", "results.dat")) else f"fallback ({SIA_MC_4EOS} Ry)"
+        src_kg    = "stage 2 data" if _read_dat(os.path.join(base, "siesta_02_kpoints",    "results.dat")) else f"fallback {SIA_KG_4EOS}"
+        src_bs    = "stage 3 data" if _read_dat(os.path.join(base, "siesta_03_basissize",  "results.dat")) else f"fallback ({SIA_BASIS_4EOS})"
+        src_es    = "stage 4 data" if _read_dat(os.path.join(base, "siesta_04_energyshift","results.dat")) else f"fallback ({SIA_ES_4EOS} Ry)"
+        src_scale = f"BM fit  a0={struct.cellpar[0]*scale_fit:.4f} Å" if abs(scale_fit-1.0) > 1e-6 else "experimental CIF (no EOS data)"
+
+        params = {"meshcut": meshcut, "kgrid": kg, "basis": basis, "eshift": eshift, "scale_fit": scale_fit}
+
+        kg_str = "x".join(str(k) for k in kg)
+        print(f"  {'MeshCutoff':<18}: {meshcut} Ry    ← {src_mc}")
+        print(f"  {'k-grid':<18}: {kg_str}        ← {src_kg}")
+        print(f"  {'PAO.BasisSize':<18}: {basis}        ← {src_bs}")
+        print(f"  {'PAO.EnergyShift':<18}: {eshift} Ry   ← {src_es}")
+        print(f"  {'Lattice a0':<18}: {src_scale}  ← stage 5 BM fit")
+        print()
+
+        out_dir, fdf_path, _ = generate_vc_relax_sia(cfg, params)
+
+        print(c("ok", f"  ✓ SIESTA vc-relax FDF written : {fdf_path}"))
+        print(c("ok", f"  ✓ Pseudopotentials copied     : {out_dir}"))
+        print(c("ok", f"  ✓ Runner script written       : {os.path.join(out_dir, 'run_vc_relax.sh')}"))
+        print()
+        print(c("bold", "  To launch:"))
+        print(f"    cd {out_dir}")
+        print(f"    ./run_vc_relax.sh")
 
 def banner():
     print(c("header", """
@@ -1219,6 +1796,9 @@ def main():
     for s in stages:
         runners[s](cfg)
 
+    # ── Auto-generate vc-relax input after all stages complete ──
+    generate_vc_relax(cfg)
+
     total_time = round(time.time() - t_start)
     m, sec = divmod(total_time, 60)
     h, m   = divmod(m, 60)
@@ -1228,6 +1808,7 @@ def main():
     print(c("ok", f"  CONVERGENCE SUITE COMPLETE for {struct.formula}"))
     print(c("ok", f"  Total runtime : {h:02d}h {m:02d}m {sec:02d}s"))
     print(c("ok", f"  Results saved : {cfg['base']}"))
+    print(c("ok", f"  vc-relax input: {os.path.join(cfg['base'], 'vc_relax_production')}"))
     print(c("ok", "═" * 64))
 
 if __name__ == "__main__":
